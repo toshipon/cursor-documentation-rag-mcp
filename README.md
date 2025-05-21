@@ -1,9 +1,11 @@
 # Cursor Documentation RAG MCP System
 
 ## Overview
+
 A system that vectorizes and searches through various document types (Markdown, PDF, source code) using PLaMo-Embedding-1B. It provides vector search capabilities via an MCP (Memory Context Protocol) server to allow Cursor to search through documentation efficiently.
 
 ## Key Features
+
 - Document vectorization using PLaMo-Embedding-1B
 - Vector storage with SQLite-VSS
 - FastAPI-based MCP server with performance optimizations
@@ -46,6 +48,7 @@ python scripts/start_mcp_server.py
 ## System Components
 
 ### Core Components
+
 - **Embedding Engine**: Converts text to vector embeddings using PLaMo-Embedding-1B
 - **Text Splitters**: Handles different document types with chunking strategies
 - **Document Processors**: Specialized processors for Markdown, code, and PDF files
@@ -53,11 +56,13 @@ python scripts/start_mcp_server.py
 - **MCP Server**: FastAPI server with query endpoints
 
 ### Automation Components
+
 - **File Watcher**: Monitors file changes and triggers vectorization
 - **Vectorization Worker**: Processes file change events
 - **Scheduler**: Periodic document scanning
 
 ## Performance Optimizations
+
 - **Caching**: Both query results and embeddings are cached
 - **Batch Processing**: Support for batch query operations
 - **Resource Management**: Container memory limits
@@ -65,6 +70,7 @@ python scripts/start_mcp_server.py
 - **Advanced Filtering**: Metadata-based filtering capabilities
 
 ## Configuration
+
 The system can be configured via environment variables or the `.env` file:
 
 - `DATA_DIR`: Directory containing documents to vectorize
@@ -94,4 +100,5 @@ The system can be configured via environment variables or the `.env` file:
 - `models/`: Embedding models
 
 ## License
+
 MIT

@@ -2,12 +2,12 @@ FROM python:3.10-slim
 
 # Install dependencies for building packages
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    build-essential \
-    git \
-    curl \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+  apt-get install -y --no-install-recommends \
+  build-essential \
+  git \
+  curl \
+  && apt-get clean \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -17,21 +17,21 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Install additional performance-related packages
 RUN pip install --no-cache-dir \
-    uvloop \
-    httptools \
-    gunicorn \
-    cachetools
+  uvloop \
+  httptools \
+  gunicorn \
+  cachetools
 
 # Copy application code
 COPY . .
 
 # Create necessary directories with appropriate permissions
 RUN mkdir -p /app/data /app/models /app/vector_store && \
-    chmod -R 755 /app/data /app/models /app/vector_store
+  chmod -R 755 /app/data /app/models /app/vector_store
 
 # Add health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+  CMD curl -f http://localhost:8000/health || exit 1
 
 # Set Python optimizations
 ENV PYTHONOPTIMIZE=1
