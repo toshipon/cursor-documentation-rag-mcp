@@ -1,23 +1,48 @@
-from fastapi import FastAPI, Request
-import uvicorn
-from vectorize.embeddings import DummyEmbedder
-from db.vector_store import VectorStore
 import os
+import sys
+import argparse
+import logging
+import uvicorn
 
-app = FastAPI()
-DB_PATH = os.environ.get("VECTOR_DB_PATH", "vector_store/vector_store.db")
-vector_store = VectorStore(DB_PATH)
-embedder = DummyEmbedder()
+# プロジェクトのルートディレクトリをシステムパスに追加
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-@app.post("/query")
-async def query_endpoint(request: Request):
-    data = await request.json()
-    query = data.get("query", "")
-    top_k = data.get("top_k", 5)
-    # フィルタは未実装
-    q_vec = embedder.embed(query)
-    results = vector_store.similarity_search(q_vec, top_k=top_k)
-    return {"results": results}
+import config
+
+# ロギング設定
+logging.basicConfig(level=getattr(logging, config.LOG_LEVEL))
+logger = logging.getLogger(__name__)
+
+def main():
+    """
+    Memory Context Provider (MCP) サーバーを起動する
+    """
+    parser = argparse.ArgumentParser(description="MCP サーバーを起動します")
+    parser.add_argument("--host", default="0.0.0.0", help="ホストアドレス (デフォルト: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8000, help="ポート番号 (デフォルト: 8000)")
+    parser.add_argument("--reload", action="store_true", help="ファイル変更時に自動リロード（開発用）")
+    parser.add_argument("--debug", action="store_true", help="デバッグモードで実行")
+    args = parser.parse_args()
+
+    # サーバー設定
+    host = args.host
+    port = args.port
+    reload = args.reload
+    log_level = "debug" if args.debug else "info"
+    
+    # ログメッセージ
+    logger.info(f"Starting MCP server at http://{host}:{port}")
+    logger.info(f"Vector DB path: {config.VECTOR_DB_PATH}")
+    logger.info(f"Embedding model path: {config.EMBEDDING_MODEL_PATH}")
+    
+    # MCPサーバーを起動（mcp.server:appアプリケーションを指定）
+    uvicorn.run(
+        "mcp.server:app",
+        host=host,
+        port=port,
+        reload=reload,
+        log_level=log_level
+    )
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    main()

@@ -1,0 +1,84 @@
+# Python関連
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 仮想環境
+venv/
+ENV/
+.env
+
+# モデル関連
+/models/
+models/plamo-embedding-1b/
+
+# データとベクトルストア
+/data/
+/vector_store/
+*.db
+vector_store/*.db
+
+# ログ
+*.log
+logs/
+
+# ディストリビューションとパッケージング
+.Python
+*.manifest
+*.spec
+
+# インストーラのログ
+pip-log.txt
+pip-delete-this-directory.txt
+
+# IDE関連
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# ユニットテスト/カバレッジレポート
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*,cover
+.hypothesis/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyInstaller
+*.manifest
+*.spec
+
+# pyenv
+.python-version
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
