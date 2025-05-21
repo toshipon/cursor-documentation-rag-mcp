@@ -198,10 +198,75 @@ class TestDockerIntegration:
         )
         assert response.status_code == 200
         result = response.json()
-        
         # すべての結果がmarkdownタイプであることを確認
         for doc in result["results"]:
             assert doc["metadata"]["source_type"] == "markdown"
+    
+    def test_hybrid_search(self):
+        """ハイブリッド検索のテスト"""
+        hybrid_query = {
+            "query": "ベクトル検索と類似度",
+            "top_k": 3,
+            "vector_weight": 0.6,
+            "text_weight": 0.4
+        }
+        
+        response = requests.post(
+            f"{TEST_SERVER_URL}/hybrid_search",
+            json=hybrid_query
+        )
+        assert response.status_code == 200
+        result = response.json()
+        assert "results" in result
+        assert "query_time_ms" in result
+        
+        # ハイブリッド検索はキャッシュが効くことを確認
+        # 2回目の呼び出し
+        response2 = requests.post(
+            f"{TEST_SERVER_URL}/hybrid_search",
+            json=hybrid_query
+        )
+        assert response2.status_code == 200
+        result2 = response2.json()
+        assert result2["cached"]  # キャッシュされたレスポンス
+    
+    def test_keyword_search(self):
+        """キーワード検索のテスト"""
+        keyword_query = {
+            "keyword": "Docker環境",
+            "top_k": 2
+        }
+        
+        response = requests.post(
+            f"{TEST_SERVER_URL}/keyword_search",
+            json=keyword_query
+        )
+        assert response.status_code == 200
+        result = response.json()
+        assert "results" in result
+        
+        # Dockerに関連する結果が返ってくることを確認
+        found = False
+        for doc in result["results"]:
+            if "Docker" in doc["content"]:
+                found = True
+                break
+        assert found, "Docker関連の結果が含まれていません"
+    
+    def test_database_optimization(self):
+        """データベース最適化のテスト"""
+        # データベースの最適化を実行
+        response = requests.post(
+            f"{TEST_SERVER_URL}/maintenance/optimize_db"
+        )
+        assert response.status_code == 200
+        result = response.json()
+        assert "status" in result
+        assert result["status"] == "success"
+        
+        # 最適化処理の詳細情報が含まれていることを確認
+        assert "details" in result
+        assert "execution_time_ms" in result["details"]
 
 if __name__ == "__main__":
     # PyTestを使わず直接実行する場合
@@ -214,6 +279,9 @@ if __name__ == "__main__":
         test.test_batch_query()
         test.test_caching()
         test.test_filter_query()
+        test.test_hybrid_search()
+        test.test_keyword_search()
+        test.test_database_optimization()
         print("All tests passed!")
     finally:
         test.teardown_class()
