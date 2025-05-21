@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  mcp-server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: cursor-doc-rag-mcp:latest
+    container_name: mcp-server
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./vector_store:/app/vector_store
+    env_file:
+      - .env
+    environment:
+      - WORKERS=${WORKERS:-4}
+      - BATCH_SIZE=${BATCH_SIZE:-16}
+      - MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-32}
+    command: start-mcp-server
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: ${MCP_SERVER_MEMORY:-4g}
+        reservations:
+          memory: 1g
+
+  file-watcher:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: cursor-doc-rag-mcp:latest
+    container_name: file-watcher
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./vector_store:/app/vector_store
+    env_file:
+      - .env
+    command: start-file-watcher
+    restart: unless-stopped
+    depends_on:
+      - mcp-server
+    deploy:
+      resources:
+        limits:
+          memory: ${FILE_WATCHER_MEMORY:-1g}
+
+  scheduled-vectorization:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: cursor-doc-rag-mcp:latest
+    container_name: scheduled-vectorization
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./vector_store:/app/vector_store
+    env_file:
+      - .env
+    environment:
+      - ENABLE_SCHEDULED_VECTORIZATION=${ENABLE_SCHEDULED_VECTORIZATION:-true}
+      - SCHEDULE_INTERVAL=${SCHEDULE_INTERVAL:-3600}
+    command: scheduled-vectorization
+    restart: unless-stopped
+    depends_on:
+      - mcp-server
+    deploy:
+      resources:
+        limits:
+          memory: ${SCHEDULED_VECTORIZATION_MEMORY:-1g}

@@ -1,49 +1,97 @@
-# cursor-documentation-rag-mcp
+# Cursor Documentation RAG MCP System
 
-## 概要
-社内ドキュメント（Confluence, PDF, ソースコード等）をベクター化し、MCP（Memory Context Provider）経由で検索・利用できるシステムです。Cursorから関連情報を素早く取得し、効率的なドキュメンテーションを実現します。
+## Overview
+A system that vectorizes and searches through various document types (Markdown, PDF, source code) using PLaMo-Embedding-1B. It provides vector search capabilities via an MCP (Memory Context Protocol) server to allow Cursor to search through documentation efficiently.
 
-## 主な機能
-- ドキュメントのベクター化（PLaMo-Embedding-1B利用）
-- SQLite-VSSによるベクトルDB格納・検索
-- FastAPIベースのMCPサーバー
-- Markdown/PDF/コード対応
-- Dockerによる簡単なデプロイ
+## Key Features
+- Document vectorization using PLaMo-Embedding-1B
+- Vector storage with SQLite-VSS
+- FastAPI-based MCP server with performance optimizations
+- Support for Markdown, PDF, and code documents
+- File change monitoring for automatic updates
+- Scheduled document scanning
+- Batch query processing with caching
+- Docker deployment with resource management
 
-## セットアップ
+## Setup
+
+### Using Docker (Recommended)
 
 ```bash
-# 依存パッケージのインストール
+# Start all services
+docker-compose up -d
+
+# Or start individual services
+docker-compose up -d mcp-server
+docker-compose up -d file-watcher
+docker-compose up -d scheduled-vectorization
+```
+
+### Manual Setup
+
+```bash
+# Install dependencies
 pip install -r requirements.txt
-```
 
-## 使い方
+# Download the PLaMo-Embedding-1B model
+python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='pfnet/plamo-embedding-1b', local_dir='models/plamo-embedding-1b')"
 
-### ドキュメントのベクター化
+# Vectorize documents
+python scripts/vectorize_docs.py
 
-```bash
-python scripts/vectorize_docs.py --input_dir [ドキュメントディレクトリ] --output_db [DBパス]
-```
-
-### MCPサーバーの起動
-
-```bash
+# Start the MCP server
 python scripts/start_mcp_server.py
 ```
 
-またはDockerを利用
+## System Components
 
-```bash
-docker-compose -f docker/docker-compose.yml up -d
-```
+### Core Components
+- **Embedding Engine**: Converts text to vector embeddings using PLaMo-Embedding-1B
+- **Text Splitters**: Handles different document types with chunking strategies
+- **Document Processors**: Specialized processors for Markdown, code, and PDF files
+- **Vector Database**: SQLite-VSS for vector similarity search
+- **MCP Server**: FastAPI server with query endpoints
 
-## ディレクトリ構成（抜粋）
+### Automation Components
+- **File Watcher**: Monitors file changes and triggers vectorization
+- **Vectorization Worker**: Processes file change events
+- **Scheduler**: Periodic document scanning
 
-- vectorize/ : ベクター化・テキスト分割・各種プロセッサ
-- db/ : ベクトルDB管理
-- mcp/ : サーバー実装
-- scripts/ : 実行スクリプト
-- docker/ : Docker関連ファイル
+## Performance Optimizations
+- **Caching**: Both query results and embeddings are cached
+- **Batch Processing**: Support for batch query operations
+- **Resource Management**: Container memory limits
+- **Worker Scaling**: Configurable worker processes for the API server
+- **Advanced Filtering**: Metadata-based filtering capabilities
 
-## ライセンス
+## Configuration
+The system can be configured via environment variables or the `.env` file:
+
+- `DATA_DIR`: Directory containing documents to vectorize
+- `MODEL_DIR`: Directory containing the embedding model
+- `VECTOR_DB_PATH`: Path to the SQLite vector database
+- `EMBEDDING_MODEL_PATH`: Path to the PLaMo model
+- `WORKERS`: Number of worker processes for the API server
+- `BATCH_SIZE`: Batch size for embedding generation
+- `MAX_BATCH_SIZE`: Maximum batch size for query processing
+- `SCHEDULE_INTERVAL`: Interval for scheduled vectorization (seconds)
+
+## API Endpoints
+
+- `POST /query`: Search for similar documents
+- `POST /batch_query`: Batch search for multiple queries
+- `GET /stats`: Get database statistics
+- `GET /health`: Health check endpoint
+
+## Directory Structure
+
+- `vectorize/`: Embedding and text splitting logic
+- `db/`: Vector database implementation
+- `mcp/`: MCP server implementation
+- `scripts/`: Utility scripts
+- `workers/`: File watcher and worker implementation
+- `docker/`: Docker configuration files
+- `models/`: Embedding models
+
+## License
 MIT

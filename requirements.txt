@@ -10,3 +10,7 @@ scikit-learn
 watchdog
 pdfplumber
 python-multipart
+uvloop
+httptools
+gunicorn
+cachetools

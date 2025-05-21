@@ -171,6 +171,61 @@ class VectorStore:
             logger.error(f"Error adding documents to vector store: {e}")
             raise
 
+    def _build_search_query(self, filter_criteria: Dict[str, Any] = None) -> Tuple[str, List[Any]]:
+        """
+        検索クエリとパラメータを構築する内部メソッド
+        
+        Args:
+            filter_criteria: フィルタリング条件（オプション）
+            
+        Returns:
+            クエリ文字列とフィルタパラメータのタプル
+        """
+        # 基本クエリの構築
+        query = """
+            SELECT 
+                d.id, d.content, d.source, d.source_type, d.metadata,
+                vss_documents.distance AS score
+            FROM 
+                vss_documents
+            JOIN 
+                documents d ON vss_documents.rowid = d.id
+            WHERE 
+                vss_documents.vector_search(?)
+        """
+        
+        # フィルタリング条件があれば追加
+        filter_clauses = []
+        filter_params = []
+        
+        if filter_criteria:
+            # ソースタイプでフィルタリング
+            if "source_type" in filter_criteria:
+                source_types = filter_criteria["source_type"]
+                if isinstance(source_types, str):
+                    source_types = [source_types]
+                placeholders = ", ".join("?" for _ in source_types)
+                filter_clauses.append(f"d.source_type IN ({placeholders})")
+                filter_params.extend(source_types)
+            
+            # ソースパスでフィルタリング
+            if "source" in filter_criteria:
+                source_path = filter_criteria["source"]
+                filter_clauses.append("d.source LIKE ?")
+                filter_params.append(f"%{source_path}%")
+            
+            # メタデータのJSONフィールドでフィルタリング
+            if "metadata" in filter_criteria:
+                for key, value in filter_criteria["metadata"].items():
+                    filter_clauses.append(f"json_extract(d.metadata, '$.{key}') = ?")
+                    filter_params.append(value)
+        
+        # フィルタリング条件を追加
+        if filter_clauses:
+            query += " AND " + " AND ".join(filter_clauses)
+        
+        return query, filter_params
+
     def similarity_search(self, query_vector: List[float], top_k: int = 5, filter_criteria: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """
         ベクトル類似度に基づいてドキュメントを検索
@@ -188,46 +243,9 @@ class VectorStore:
             return []
         
         try:
-            # 基本クエリの構築
-            query = """
-                SELECT 
-                    d.id, d.content, d.source, d.source_type, d.metadata,
-                    vss_documents.distance AS score
-                FROM 
-                    vss_documents
-                JOIN 
-                    documents d ON vss_documents.rowid = d.id
-                WHERE 
-                    vss_documents.vector_search(?)
-            """
+            # 検索クエリを構築
+            query, filter_params = self._build_search_query(filter_criteria)
             
-            # フィルタリング条件があれば追加
-            filter_clauses = []
-            filter_params = []
-            
-            if filter_criteria:
-                # ソースタイプでフィルタリング
-                if "source_type" in filter_criteria:
-                    source_types = filter_criteria["source_type"]
-                    if isinstance(source_types, str):
-                        source_types = [source_types]
-                    placeholders = ", ".join("?" for _ in source_types)
-                    filter_clauses.append(f"d.source_type IN ({placeholders})")
-                    filter_params.extend(source_types)
-                
-                # ソースパスでフィルタリング
-                if "source" in filter_criteria:
-                    source_path = filter_criteria["source"]
-                    filter_clauses.append("d.source LIKE ?")
-                    filter_params.append(f"%{source_path}%")
-                
-                # その他のメタデータフィルタリングは、JSONクエリで実装可能
-                # 例えば、"language"でフィルタリングするなど
-            
-            # フィルタリング条件を追加
-            if filter_clauses:
-                query += " AND " + " AND ".join(filter_clauses)
-                
             # 結果の制限を追加
             query += " LIMIT ?"
             
@@ -249,6 +267,65 @@ class VectorStore:
                     "metadata": metadata,
                     "score": row[5]  # 類似度スコア
                 })
+                
+            return results
+        
+        except Exception as e:
+            logger.error(f"Error during similarity search: {e}")
+            raise
+            
+    def batch_similarity_search(self, query_vectors: List[List[float]], top_k: int = 5, filter_criteria: Dict[str, Any] = None) -> List[List[Dict[str, Any]]]:
+        """
+        複数ベクトルの一括類似度検索
+        
+        Args:
+            query_vectors: 検索クエリのベクトル表現のリスト
+            top_k: 各クエリで返却する結果の最大数
+            filter_criteria: フィルタリング条件（オプション）
+            
+        Returns:
+            クエリごとの類似ドキュメントのリストのリスト
+        """
+        if not query_vectors:
+            logger.warning("Empty query vectors provided to batch_similarity_search")
+            return []
+        
+        try:
+            # 検索クエリを構築
+            query, filter_params = self._build_search_query(filter_criteria)
+            
+            # 結果の制限を追加
+            query += " LIMIT ?"
+            
+            # 各クエリベクトルに対して検索を実行
+            all_results = []
+            for q_vec in query_vectors:
+                # クエリパラメータを準備
+                params = [q_vec] + filter_params + [top_k]
+                
+                # クエリ実行
+                cursor = self.conn.execute(query, params)
+                
+                # 結果を整形
+                query_results = []
+                for row in cursor.fetchall():
+                    # JSON形式のメタデータをパース
+                    metadata = json.loads(row[4])
+                    
+                    query_results.append({
+                        "id": row[0],
+                        "content": row[1],
+                        "metadata": metadata,
+                        "score": row[5]  # 類似度スコア
+                    })
+                
+                all_results.append(query_results)
+            
+            return all_results
+            
+        except Exception as e:
+            logger.error(f"Error during batch similarity search: {e}")
+            raise
             
             logger.info(f"Found {len(results)} similar documents")
             return results
