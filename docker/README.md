@@ -10,7 +10,7 @@ This directory contains Docker configuration files for deploying the Cursor Docu
 
 ## Available Services
 
-The docker-compose configuration includes three services:
+The docker compose configuration includes three services:
 
 1. **mcp-server**: Runs the MCP server to handle vector search requests
 2. **file-watcher**: Monitors document directories for changes and triggers vectorization
@@ -39,33 +39,33 @@ You can customize the following environment variables:
 ### Building and Starting All Services
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 ### Starting Individual Services
 
 ```bash
-docker-compose up -d mcp-server
-docker-compose up -d file-watcher
-docker-compose up -d scheduled-vectorization
+docker compose up -d mcp-server
+docker compose up -d file-watcher
+docker compose up -d scheduled-vectorization
 ```
 
 ### Manually Vectorizing Documents
 
 ```bash
-docker-compose run --rm mcp-server vectorize-docs
+docker compose run --rm mcp-server vectorize-docs
 ```
 
 ### Viewing Logs
 
 ```bash
-docker-compose logs -f mcp-server
-docker-compose logs -f file-watcher
-docker-compose logs -f scheduled-vectorization
+docker compose logs -f mcp-server
+docker compose logs -f file-watcher
+docker compose logs -f scheduled-vectorization
 ```
 
 ### Stopping Services
 
 ```bash
-docker-compose down
+docker compose down
 ```

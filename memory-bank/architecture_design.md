@@ -252,17 +252,17 @@ exec python -m mcp.server
 
 ```bash
 # ドキュメントをマウントして、ベクター化を実行
-docker-compose -f docker/docker-compose.yml run --rm -v /path/to/documents:/app/data/documents mcp-server python -m scripts.vectorize_docs --input_dir /app/data/documents --output_db /app/vector_store/vector_store.db
+docker compose -f docker/docker compose.yml run --rm -v /path/to/documents:/app/data/documents mcp-server python -m scripts.vectorize_docs --input_dir /app/data/documents --output_db /app/vector_store/vector_store.db
 ```
 
 #### MCP サーバーの起動
 
 ```bash
 # サーバーの起動
-docker-compose -f docker/docker-compose.yml up -d
+docker compose -f docker/docker compose.yml up -d
 
 # ログの確認
-docker-compose -f docker/docker-compose.yml logs -f
+docker compose -f docker/docker compose.yml logs -f
 ```
 
 #### Curl でのテスト

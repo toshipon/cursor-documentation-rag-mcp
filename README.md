@@ -21,12 +21,12 @@ A system that vectorizes and searches through various document types (Markdown, 
 
 ```bash
 # Start all services
-docker-compose up -d
+docker compose up -d
 
 # Or start individual services
-docker-compose up -d mcp-server
-docker-compose up -d file-watcher
-docker-compose up -d scheduled-vectorization
+docker compose up -d mcp-server
+docker compose up -d file-watcher
+docker compose up -d scheduled-vectorization
 ```
 
 ### Manual Setup

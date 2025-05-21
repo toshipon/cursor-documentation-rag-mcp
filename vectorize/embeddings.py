@@ -23,6 +23,20 @@ class DummyEmbedder:
 
     def embed_batch(self, texts):
         return [self.embed(t) for t in texts]
+        
+    def embed_query(self, text):
+        """
+        クエリテキストを埋め込みベクトルに変換するメソッド
+        integration_testのno-Docker対応用に追加
+        
+        Args:
+            text: 埋め込むテキスト
+            
+        Returns:
+            埋め込みベクトル（リスト形式）
+        """
+        # embedメソッドを再利用
+        return self.embed(text)
 
 class PLaMoEmbedder:
     """PLaMo-Embedding-1Bを使用したテキスト埋め込みクラス"""
