@@ -84,10 +84,15 @@ The system can be configured via environment variables or the `.env` file:
 
 ## API Endpoints
 
+### Main Endpoints
+
 - `POST /query`: Search for similar documents
 - `POST /batch_query`: Batch search for multiple queries
 - `GET /stats`: Get database statistics
 - `GET /health`: Health check endpoint
+- `GET /metrics`: Get Prometheus metrics
+
+### Creating an Admin User
 
 ## Directory Structure
 

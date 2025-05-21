@@ -14,3 +14,6 @@ uvloop
 httptools
 gunicorn
 cachetools
+# Monitoring dependencies
+prometheus-client
+psutil

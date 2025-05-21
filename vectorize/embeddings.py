@@ -52,8 +52,8 @@ class PLaMoEmbedder:
         # モデルとトークナイザの初期化
         try:
             logger.info(f"Loading model from {self.model_path}")
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
-            self.model = AutoModel.from_pretrained(self.model_path).to(self.device).eval()
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
+            self.model = AutoModel.from_pretrained(self.model_path, trust_remote_code=True).to(self.device).eval()
             self.dim = self.model.config.hidden_size
             logger.info(f"Model loaded successfully. Embedding dimension: {self.dim}")
         except Exception as e:

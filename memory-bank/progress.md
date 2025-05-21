@@ -32,19 +32,19 @@
   - [x] PDF プロセッサの実装
   - [x] ソースコードプロセッサの実装
   - [x] 各ファイルタイプのメタデータ拡張
-- [ ] 監視ベースの自動取り込み機能
-  - [ ] file_watcher.py の実装
-  - [ ] vectorization_worker.py の実装
-  - [ ] イベントキューの管理
-- [ ] スケジュールベースの取り込み機能
-  - [ ] scheduled_vectorization.py の実装
-  - [ ] 差分管理機能の実装
-  - [ ] メタデータテーブルの設計と実装
-- [ ] Docker 環境の構築
-  - [ ] Dockerfile の作成
-  - [ ] docker-compose.yml の作成
-  - [ ] entrypoint.sh の作成
-  - [ ] マウントボリュームの設定
+- [x] 監視ベースの自動取り込み機能
+  - [x] file_watcher.py の実装
+  - [x] vectorization_worker.py の実装
+  - [x] イベントキューの管理
+- [x] スケジュールベースの取り込み機能
+  - [x] scheduled_vectorization.py の実装
+  - [x] 差分管理機能の実装
+  - [x] メタデータテーブルの設計と実装
+- [x] Docker 環境の構築
+  - [x] Dockerfile の作成
+  - [x] docker-compose.yml の作成
+  - [x] entrypoint.sh の作成
+  - [x] マウントボリュームの設定
 
 ### Phase 3: 最適化・拡張 (5-6 週目)
 
