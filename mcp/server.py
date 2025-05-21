@@ -86,6 +86,29 @@ class BatchQueryResponse(BaseModel):
     query_time_ms: float = Field(..., description="クエリ処理時間（ミリ秒）")
     cached_count: int = Field(0, description="キャッシュから取得した結果の数")
 
+class HybridSearchRequest(BaseModel):
+    """ハイブリッド検索リクエスト"""
+    query: str = Field(..., description="検索クエリテキスト")
+    top_k: int = Field(5, description="返却する結果数", ge=1, le=50)
+    filters: Optional[Dict[str, Any]] = Field(None, description="フィルタリング条件")
+    cache: bool = Field(True, description="キャッシュを使用するかどうか")
+    vector_weight: float = Field(0.7, description="ベクトル検索の重み", ge=0.0, le=1.0)
+    text_weight: float = Field(0.3, description="テキスト検索の重み", ge=0.0, le=1.0)
+
+class KeywordSearchRequest(BaseModel):
+    """キーワード検索リクエスト"""
+    keyword: str = Field(..., description="検索キーワード")
+    top_k: int = Field(5, description="返却する結果数", ge=1, le=50)
+    filters: Optional[Dict[str, Any]] = Field(None, description="フィルタリング条件")
+    cache: bool = Field(True, description="キャッシュを使用するかどうか")
+    match_type: str = Field("contains", description="一致タイプ (contains, exact, starts_with, ends_with)")
+
+# ハイブリッド検索キャッシュ
+hybrid_search_cache = TTLCache(maxsize=500, ttl=600)  # 10分間のTTLで500件までキャッシュ
+
+# キーワード検索キャッシュ
+keyword_search_cache = TTLCache(maxsize=500, ttl=600)  # 10分間のTTLで500件までキャッシュ
+
 # グローバル変数
 embedder = None
 vector_store = None
@@ -145,6 +168,20 @@ def get_vector_store():
         def batch_similarity_search(self, query_vectors, top_k=5, filter_criteria=None):
             # Return dummy results for each query
             return [self.similarity_search(qv, top_k, filter_criteria) for qv in query_vectors]
+            
+        def hybrid_search(self, query_text, query_vector, top_k=5, filter_criteria=None, vector_weight=0.7, text_weight=0.3):
+            # Return dummy hybrid search results
+            return [
+                {"content": f"Hybrid content {i}", "metadata": {"source": f"hybrid{i}.md"}, "score": 0.8 - i*0.1}
+                for i in range(min(top_k, 5))
+            ]
+            
+        def keyword_search(self, keyword, top_k=5, filter_criteria=None, match_type="contains"):
+            # Return dummy keyword search results
+            return [
+                {"content": f"Keyword content {i}", "metadata": {"source": f"keyword{i}.md"}, "score": 0.85 - i*0.05}
+                for i in range(min(top_k, 5))
+            ]
             
         def get_stats(self):
             return {"total_documents": 100, "total_vectors": 500}
@@ -222,7 +259,11 @@ async def get_stats(
         "query_cache_size": len(query_cache),
         "query_cache_capacity": query_cache.maxsize,
         "embedding_cache_size": len(embedding_cache),
-        "embedding_cache_capacity": embedding_cache.maxsize
+        "embedding_cache_capacity": embedding_cache.maxsize,
+        "hybrid_search_cache_size": len(hybrid_search_cache),
+        "hybrid_search_cache_capacity": hybrid_search_cache.maxsize,
+        "keyword_search_cache_size": len(keyword_search_cache),
+        "keyword_search_cache_capacity": keyword_search_cache.maxsize
     }
     
     # モニタリング情報を追加
@@ -451,6 +492,200 @@ async def batch_query(
     except Exception as e:
         logger.error(f"Error processing batch query: {e}")
         raise HTTPException(status_code=500, detail=f"Batch query processing error: {str(e)}")
+
+@app.post("/hybrid_search", response_model=QueryResponse)
+async def hybrid_search(
+    request: HybridSearchRequest,
+    embedder = Depends(get_embedder),
+    vector_store: VectorStore = Depends(get_vector_store),
+    background_tasks: BackgroundTasks = None
+):
+    """
+    ハイブリッド検索エンドポイント（ベクトル類似度検索とテキスト検索を組み合わせる）
+    
+    Args:
+        request: ハイブリッド検索リクエスト
+        embedder: 埋め込みモデル
+        vector_store: ベクトルストア
+        background_tasks: バックグラウンドタスク
+        
+    Returns:
+        検索結果レスポンス
+    """
+    start_time = time.time()
+    
+    # キャッシュキーの生成
+    cache_key = f"{request.query}:{request.top_k}:{request.filters}:{request.vector_weight}:{request.text_weight}"
+    
+    # キャッシュから結果を取得
+    if request.cache and cache_key in hybrid_search_cache:
+        logger.debug(f"Cache hit for hybrid search: {request.query}")
+        cached_result = hybrid_search_cache[cache_key]
+        cached_result["cached"] = True
+        cached_result["query_time_ms"] = (time.time() - start_time) * 1000
+        
+        # モニタリングのためのメトリクス記録
+        monitor.record_query("hybrid", cached_result["query_time_ms"] / 1000, cached=True)
+        
+        return QueryResponse(**cached_result)
+    
+    try:
+        # クエリベクトルのキャッシュをチェック
+        if request.query in embedding_cache:
+            query_vector = embedding_cache[request.query]
+        else:
+            # クエリテキストを埋め込みベクトルに変換
+            query_vector = embedder.embed(request.query)
+            # キャッシュに保存
+            if request.cache:
+                embedding_cache[request.query] = query_vector
+        
+        # ハイブリッド検索を実行
+        search_results = vector_store.hybrid_search(
+            query_text=request.query,
+            query_vector=query_vector,
+            top_k=request.top_k,
+            filter_criteria=request.filters,
+            vector_weight=request.vector_weight,
+            text_weight=request.text_weight
+        )
+        
+        # レスポンスを整形
+        results = []
+        for result in search_results:
+            results.append(QueryResult(
+                content=result["content"],
+                metadata=result["metadata"],
+                score=float(result["score"])
+            ))
+        
+        # 処理時間を計算（ミリ秒単位）
+        query_time_ms = (time.time() - start_time) * 1000
+        
+        response_data = {
+            "results": results,
+            "total": len(results),
+            "query_time_ms": query_time_ms,
+            "cached": False
+        }
+        
+        # モニタリングのためのメトリクス記録
+        monitor.record_query("hybrid", query_time_ms / 1000, cached=False)
+        
+        # 結果をキャッシュに保存（バックグラウンドで）
+        if request.cache and background_tasks:
+            background_tasks.add_task(lambda: hybrid_search_cache.update({cache_key: response_data}))
+        elif request.cache:
+            hybrid_search_cache[cache_key] = response_data
+        
+        return QueryResponse(**response_data)
+        
+    except Exception as e:
+        logger.error(f"Error processing hybrid search: {e}")
+        raise HTTPException(status_code=500, detail=f"Hybrid search processing error: {str(e)}")
+
+@app.post("/keyword_search", response_model=QueryResponse)
+async def keyword_search(
+    request: KeywordSearchRequest,
+    vector_store: VectorStore = Depends(get_vector_store),
+    background_tasks: BackgroundTasks = None
+):
+    """
+    キーワード検索エンドポイント（ベクトル検索を使用せず、テキスト検索のみ）
+    
+    Args:
+        request: キーワード検索リクエスト
+        vector_store: ベクトルストア
+        background_tasks: バックグラウンドタスク
+        
+    Returns:
+        検索結果レスポンス
+    """
+    start_time = time.time()
+    
+    # キャッシュキーの生成
+    cache_key = f"{request.keyword}:{request.top_k}:{request.filters}:{request.match_type}"
+    
+    # キャッシュから結果を取得
+    if request.cache and cache_key in keyword_search_cache:
+        logger.debug(f"Cache hit for keyword search: {request.keyword}")
+        cached_result = keyword_search_cache[cache_key]
+        cached_result["cached"] = True
+        cached_result["query_time_ms"] = (time.time() - start_time) * 1000
+        
+        # モニタリングのためのメトリクス記録
+        monitor.record_query("keyword", cached_result["query_time_ms"] / 1000, cached=True)
+        
+        return QueryResponse(**cached_result)
+    
+    try:
+        # キーワード検索を実行
+        search_results = vector_store.keyword_search(
+            keyword=request.keyword,
+            top_k=request.top_k,
+            filter_criteria=request.filters,
+            match_type=request.match_type
+        )
+        
+        # レスポンスを整形
+        results = []
+        for result in search_results:
+            results.append(QueryResult(
+                content=result["content"],
+                metadata=result["metadata"],
+                score=float(result["score"])
+            ))
+        
+        # 処理時間を計算（ミリ秒単位）
+        query_time_ms = (time.time() - start_time) * 1000
+        
+        response_data = {
+            "results": results,
+            "total": len(results),
+            "query_time_ms": query_time_ms,
+            "cached": False
+        }
+        
+        # モニタリングのためのメトリクス記録
+        monitor.record_query("keyword", query_time_ms / 1000, cached=False)
+        
+        # 結果をキャッシュに保存（バックグラウンドで）
+        if request.cache and background_tasks:
+            background_tasks.add_task(lambda: keyword_search_cache.update({cache_key: response_data}))
+        elif request.cache:
+            keyword_search_cache[cache_key] = response_data
+        
+        return QueryResponse(**response_data)
+        
+    except Exception as e:
+        logger.error(f"Error processing keyword search: {e}")
+        raise HTTPException(status_code=500, detail=f"Keyword search processing error: {str(e)}")
+
+@app.post("/maintenance/optimize_db")
+async def optimize_database(
+    vector_store: VectorStore = Depends(get_vector_store)
+):
+    """
+    データベース最適化エンドポイント
+    
+    Args:
+        vector_store: ベクトルストア
+        
+    Returns:
+        操作結果
+    """
+    try:
+        # データベース最適化を実行
+        vector_store.optimize_database()
+        
+        return {
+            "status": "success",
+            "message": "Database optimization completed successfully"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error optimizing database: {e}")
+        raise HTTPException(status_code=500, detail=f"Database optimization error: {str(e)}")
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):

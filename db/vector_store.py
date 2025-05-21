@@ -16,13 +16,14 @@ class VectorStore:
     SQLite-VSSを利用したベクトルストアクラス
     テキストデータとベクトルを保存し、ベクトル類似度検索を行う
     """
-    def __init__(self, db_path: str, vector_dimension: int = 512):
+    def __init__(self, db_path: str, vector_dimension: int = 512, create_indices: bool = True):
         """
         初期化
         
         Args:
             db_path: データベースファイルのパス
             vector_dimension: ベクトルの次元数
+            create_indices: インデックスを自動作成するかどうか
         """
         self.db_path = db_path
         self.vector_dimension = vector_dimension
@@ -38,6 +39,10 @@ class VectorStore:
         
         # テーブルを初期化
         self._init_db()
+        
+        # インデックスを作成
+        if create_indices:
+            self.create_indices()
         
         logger.info(f"VectorStore initialized at {db_path} with dimension {vector_dimension}")
     
@@ -98,6 +103,49 @@ class VectorStore:
         self.conn.commit()
         logger.info("Database tables initialized")
 
+        # インデックスを作成
+        self.create_indices()
+
+    def create_indices(self):
+        """
+        検索パフォーマンス向上のためのインデックスを作成
+        """
+        try:
+            logger.info("Creating indices on documents table...")
+            
+            # ソースタイプに対するインデックス（フィルタリング高速化）
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_documents_source_type
+                ON documents(source_type)
+            """)
+            
+            # ソースパスに対するインデックス（削除操作高速化）
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_documents_source
+                ON documents(source)
+            """)
+            
+            # 作成日時に対するインデックス（時間範囲フィルタリング高速化）
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_documents_created_at
+                ON documents(created_at)
+            """)
+            
+            # メタデータに対する関数ベースインデックスの作成（サンプル）
+            # よく使用されるメタデータフィールドに対してカスタムインデックスを作成
+            # ここでは例としてauthorフィールドを想定
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_documents_metadata_author
+                ON documents(json_extract(metadata, '$.author'))
+            """)
+            
+            self.conn.commit()
+            logger.info("Database indices created successfully")
+            
+        except Exception as e:
+            logger.error(f"Error creating indices: {e}")
+            raise
+    
     def add_documents(self, docs: List[Dict[str, Any]], vectors: List[List[float]], file_path: Optional[str] = None):
         """
         ドキュメントとそのベクトル表現をデータベースに追加
@@ -194,35 +242,14 @@ class VectorStore:
                 vss_documents.vector_search(?)
         """
         
-        # フィルタリング条件があれば追加
-        filter_clauses = []
-        filter_params = []
-        
-        if filter_criteria:
-            # ソースタイプでフィルタリング
-            if "source_type" in filter_criteria:
-                source_types = filter_criteria["source_type"]
-                if isinstance(source_types, str):
-                    source_types = [source_types]
-                placeholders = ", ".join("?" for _ in source_types)
-                filter_clauses.append(f"d.source_type IN ({placeholders})")
-                filter_params.extend(source_types)
-            
-            # ソースパスでフィルタリング
-            if "source" in filter_criteria:
-                source_path = filter_criteria["source"]
-                filter_clauses.append("d.source LIKE ?")
-                filter_params.append(f"%{source_path}%")
-            
-            # メタデータのJSONフィールドでフィルタリング
-            if "metadata" in filter_criteria:
-                for key, value in filter_criteria["metadata"].items():
-                    filter_clauses.append(f"json_extract(d.metadata, '$.{key}') = ?")
-                    filter_params.append(value)
+        # 共通のフィルタ構築メソッドを使用
+        filter_query, filter_params = self._build_filter_clauses(filter_criteria)
         
         # フィルタリング条件を追加
-        if filter_clauses:
-            query += " AND " + " AND ".join(filter_clauses)
+        if filter_query:
+            query += f" AND {filter_query}"
+        
+        return query, filter_params
         
         return query, filter_params
 
@@ -490,3 +517,322 @@ class VectorStore:
         if self.conn:
             self.conn.close()
             logger.info("Database connection closed")
+    
+    def hybrid_search(self, 
+                query_text: str, 
+                query_vector: List[float], 
+                top_k: int = 5, 
+                filter_criteria: Dict[str, Any] = None,
+                vector_weight: float = 0.7,
+                text_weight: float = 0.3) -> List[Dict[str, Any]]:
+        """
+        ハイブリッド検索：ベクトル類似度検索とテキスト検索を組み合わせる
+        
+        Args:
+            query_text: テキスト検索クエリ
+            query_vector: ベクトル検索クエリ
+            top_k: 返却する結果の最大数
+            filter_criteria: フィルタリング条件
+            vector_weight: ベクトル検索結果のスコアに対する重み（0.0〜1.0）
+            text_weight: テキスト検索結果のスコアに対する重み（0.0〜1.0）
+            
+        Returns:
+            ハイブリッド検索結果のリスト（スコア付き）
+        """
+        if vector_weight + text_weight != 1.0:
+            # 重みの正規化
+            total = vector_weight + text_weight
+            vector_weight = vector_weight / total
+            text_weight = text_weight / total
+            
+        # 基本クエリの構築（ベクトル部分）
+        query = """
+            SELECT 
+                d.id, d.content, d.source, d.source_type, d.metadata,
+                vss_documents.distance AS vector_score,
+                CASE 
+                    WHEN d.content LIKE ? THEN 1.0
+                    ELSE (LENGTH(d.content) - LENGTH(REPLACE(LOWER(d.content), LOWER(?), ''))) / (LENGTH(?) * 1.0)
+                END AS text_score
+            FROM 
+                vss_documents
+            JOIN 
+                documents d ON vss_documents.rowid = d.id
+            WHERE 
+                vss_documents.vector_search(?)
+        """
+
+        # フィルタリング条件を追加
+        filter_clauses = []
+        filter_params = []
+        
+        if filter_criteria:
+            # 既存のフィルタリングロジックを活用
+            _, filter_params = self._build_search_query(filter_criteria)
+            
+            # ソースタイプでフィルタリング
+            if "source_type" in filter_criteria:
+                source_types = filter_criteria["source_type"]
+                if isinstance(source_types, str):
+                    source_types = [source_types]
+                placeholders = ", ".join("?" for _ in source_types)
+                filter_clauses.append(f"d.source_type IN ({placeholders})")
+            
+            # ソースパスでフィルタリング
+            if "source" in filter_criteria:
+                source_path = filter_criteria["source"]
+                if isinstance(source_path, list):
+                    # 複数パスのOR条件
+                    path_clauses = []
+                    for _ in source_path:
+                        path_clauses.append("d.source LIKE ?")
+                    filter_clauses.append(f"({' OR '.join(path_clauses)})")
+                else:
+                    filter_clauses.append("d.source LIKE ?")
+            
+            # 作成日時でフィルタリング
+            if "created_after" in filter_criteria:
+                filter_clauses.append("d.created_at >= ?")
+            if "created_before" in filter_criteria:
+                filter_clauses.append("d.created_at <= ?")
+            
+            # メタデータのJSONフィールドでフィルタリング
+            if "metadata" in filter_criteria:
+                for key, value in filter_criteria["metadata"].items():
+                    if isinstance(value, list):
+                        # リスト値（IN句）
+                        placeholders = ", ".join("?" for _ in value)
+                        filter_clauses.append(f"json_extract(d.metadata, '$.{key}') IN ({placeholders})")
+                    elif isinstance(value, dict) and "operator" in value:
+                        op = value["operator"]
+                        if op == "contains":
+                            filter_clauses.append(f"json_extract(d.metadata, '$.{key}') LIKE ?")
+                        elif op in ["=", "!=", ">", ">=", "<", "<="]:
+                            filter_clauses.append(f"json_extract(d.metadata, '$.{key}') {op} ?")
+                        elif op == "between" and isinstance(value["value"], list) and len(value["value"]) == 2:
+                            filter_clauses.append(f"json_extract(d.metadata, '$.{key}') BETWEEN ? AND ?")
+                    else:
+                        filter_clauses.append(f"json_extract(d.metadata, '$.{key}') = ?")
+        
+        # 結果並べ替えとスコア計算の追加
+        query += f"""
+            ORDER BY ({vector_weight} * vector_score + {text_weight} * text_score) DESC
+            LIMIT ?
+        """
+        
+        # クエリパラメータを準備
+        # テキスト検索パラメータを2つ追加（LIKE検索とワード出現頻度計算用）
+        text_search_params = [f'%{query_text}%', query_text.lower(), query_text]
+        params = text_search_params + [query_vector] + filter_params + [top_k]
+        
+        try:
+            # クエリ実行
+            cursor = self.conn.execute(query, params)
+            
+            # 結果を整形
+            results = []
+            for row in cursor.fetchall():
+                # JSON形式のメタデータをパース
+                metadata = json.loads(row[4])
+                
+                # 最終スコア計算
+                vector_score = float(row[5])
+                text_score = float(row[6])
+                combined_score = vector_weight * vector_score + text_weight * text_score
+                
+                results.append({
+                    "id": row[0],
+                    "content": row[1],
+                    "metadata": metadata,
+                    "score": combined_score,
+                    "vector_score": vector_score,
+                    "text_score": text_score
+                })
+                
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error during hybrid search: {e}")
+            raise
+
+    def optimize_database(self):
+        """
+        データベースのパフォーマンス最適化を実行
+        - VACUUM: 未使用スペースの回収
+        - ANALYZE: クエリオプティマイザのための統計収集
+        """
+        try:
+            logger.info("Optimizing database...")
+            
+            # プラグマ設定
+            self.conn.execute("PRAGMA optimize")
+            
+            # ANALYZE実行（クエリプランナー向け統計情報の更新）
+            self.conn.execute("ANALYZE")
+            
+            # VACUUM実行（未使用スペース回収とDB最適化）
+            self.conn.execute("VACUUM")
+            
+            logger.info("Database optimization completed")
+            
+        except Exception as e:
+            logger.error(f"Error optimizing database: {e}")
+            raise
+    
+    def keyword_search(self, 
+                  keyword: str, 
+                  top_k: int = 5, 
+                  filter_criteria: Dict[str, Any] = None,
+                  match_type: str = "contains") -> List[Dict[str, Any]]:
+        """
+        キーワードベースのテキスト検索（ベクトル検索を使用しない）
+        
+        Args:
+            keyword: 検索キーワード
+            top_k: 返却する結果の最大数
+            filter_criteria: フィルタリング条件
+            match_type: 一致タイプ("contains", "exact", "starts_with", "ends_with")
+            
+        Returns:
+            検索結果のリスト
+        """
+        if not keyword:
+            logger.warning("Empty keyword provided to keyword_search")
+            return []
+        
+        # 基本クエリの構築
+        query = """
+            SELECT 
+                d.id, d.content, d.source, d.source_type, d.metadata
+            FROM 
+                documents d
+            WHERE 
+        """
+        
+        # 検索タイプに基づいてWHERE句を構築
+        if match_type == "exact":
+            query += "d.content = ?"
+            keyword_param = keyword
+        elif match_type == "starts_with":
+            query += "d.content LIKE ?"
+            keyword_param = f"{keyword}%"
+        elif match_type == "ends_with":
+            query += "d.content LIKE ?"
+            keyword_param = f"%{keyword}"
+        else:  # contains (default)
+            query += "d.content LIKE ?"
+            keyword_param = f"%{keyword}%"
+        
+        params = [keyword_param]
+        
+        # フィルタリング条件があれば追加
+        if filter_criteria:
+            filter_query, filter_params = self._build_filter_clauses(filter_criteria)
+            if filter_query:
+                query += f" AND {filter_query}"
+                params.extend(filter_params)
+        
+        # 結果の制限を追加
+        query += " LIMIT ?"
+        params.append(top_k)
+        
+        try:
+            # クエリ実行
+            cursor = self.conn.execute(query, params)
+            
+            # 結果を整形
+            results = []
+            for row in cursor.fetchall():
+                # JSON形式のメタデータをパース
+                metadata = json.loads(row[4])
+                
+                results.append({
+                    "id": row[0],
+                    "content": row[1],
+                    "metadata": metadata,
+                    "score": 1.0  # テキスト検索なのでスコアは意味を持たない
+                })
+                
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error during keyword search: {e}")
+            raise
+    
+    def _build_filter_clauses(self, filter_criteria: Dict[str, Any]) -> Tuple[str, List[Any]]:
+        """
+        フィルタリング条件からSQLのWHERE句を構築する
+        （_build_search_queryから分離してロジックを再利用可能に）
+        
+        Args:
+            filter_criteria: フィルタリング条件
+            
+        Returns:
+            WHERE句の文字列とパラメータリストのタプル
+        """
+        filter_clauses = []
+        filter_params = []
+        
+        if not filter_criteria:
+            return "", []
+        
+        # ソースタイプでフィルタリング
+        if "source_type" in filter_criteria:
+            source_types = filter_criteria["source_type"]
+            if isinstance(source_types, str):
+                source_types = [source_types]
+            placeholders = ", ".join("?" for _ in source_types)
+            filter_clauses.append(f"source_type IN ({placeholders})")
+            filter_params.extend(source_types)
+        
+        # ソースパスでフィルタリング
+        if "source" in filter_criteria:
+            source_path = filter_criteria["source"]
+            if isinstance(source_path, list):
+                # 複数パスのOR条件
+                path_clauses = []
+                for path in source_path:
+                    path_clauses.append("source LIKE ?")
+                    filter_params.append(f"%{path}%")
+                filter_clauses.append(f"({' OR '.join(path_clauses)})")
+            else:
+                filter_clauses.append("source LIKE ?")
+                filter_params.append(f"%{source_path}%")
+        
+        # 作成日時でフィルタリング
+        if "created_after" in filter_criteria:
+            filter_clauses.append("created_at >= ?")
+            filter_params.append(filter_criteria["created_after"])
+            
+        if "created_before" in filter_criteria:
+            filter_clauses.append("created_at <= ?")
+            filter_params.append(filter_criteria["created_before"])
+        
+        # メタデータのJSONフィールドでフィルタリング
+        if "metadata" in filter_criteria:
+            for key, value in filter_criteria["metadata"].items():
+                if isinstance(value, list):
+                    # リスト値（IN句）
+                    placeholders = ", ".join("?" for _ in value)
+                    filter_clauses.append(f"json_extract(metadata, '$.{key}') IN ({placeholders})")
+                    filter_params.extend(value)
+                elif isinstance(value, dict) and "operator" in value:
+                    # 比較演算子を使用する高度なフィルタリング
+                    op = value["operator"]
+                    val = value["value"]
+                    
+                    if op == "contains":
+                        filter_clauses.append(f"json_extract(metadata, '$.{key}') LIKE ?")
+                        filter_params.append(f"%{val}%")
+                    elif op in ["=", "!=", ">", ">=", "<", "<="]:
+                        filter_clauses.append(f"json_extract(metadata, '$.{key}') {op} ?")
+                        filter_params.append(val)
+                    elif op == "between" and isinstance(val, list) and len(val) == 2:
+                        filter_clauses.append(f"json_extract(metadata, '$.{key}') BETWEEN ? AND ?")
+                        filter_params.extend(val)
+                else:
+                    # 通常の等価比較
+                    filter_clauses.append(f"json_extract(metadata, '$.{key}') = ?")
+                    filter_params.append(value)
+        
+        return " AND ".join(filter_clauses), filter_params
