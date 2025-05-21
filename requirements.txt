@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+sqlite-vss
+langchain
+huggingface_hub
+watchdog
+pfnet-plamo-embedding-1b
