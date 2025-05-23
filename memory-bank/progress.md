@@ -149,8 +149,7 @@
   - [x] テーブルスキーマ定義
   - [x] ベクトル保存機能
   - [x] 類似検索機能
-  
-- [x] Qdrant 
+- [x] Qdrant
   - [x] qdrant_store.py を実装
   - [x] Docker コンテナ統合
   - [x] コレクション設計
