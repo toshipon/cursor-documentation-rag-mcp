@@ -153,44 +153,26 @@ def get_vector_store():
     if vector_store is not None:
         return vector_store
     
-    # For testing, create a mock vector store implementation
-    class MockVectorStore:
-        def __init__(self):
-            self.data = []
+    # スレッドローカルにない場合は初期化
+    if not hasattr(thread_local, 'vector_store'):
+        try:
+            logger.info(f"Initializing VectorStore with DB path: {config.VECTOR_DB_PATH}")
+            # モデルの埋め込み次元数を取得
+            embedder = get_embedder()
+            vector_dimension = embedder.get_dimension() if hasattr(embedder, 'get_dimension') else 2048
             
-        def similarity_search(self, query_vector, top_k=5, filter_criteria=None):
-            # Return dummy results
-            return [
-                {"content": f"Test content {i}", "metadata": {"source": f"test{i}.md"}, "score": 0.9 - i*0.1}
-                for i in range(min(top_k, 5))
-            ]
+            thread_local.vector_store = VectorStore(
+                db_path=config.VECTOR_DB_PATH,
+                vector_dimension=vector_dimension
+            )
             
-        def batch_similarity_search(self, query_vectors, top_k=5, filter_criteria=None):
-            # Return dummy results for each query
-            return [self.similarity_search(qv, top_k, filter_criteria) for qv in query_vectors]
-            
-        def hybrid_search(self, query_text, query_vector, top_k=5, filter_criteria=None, vector_weight=0.7, text_weight=0.3):
-            # Return dummy hybrid search results
-            return [
-                {"content": f"Hybrid content {i}", "metadata": {"source": f"hybrid{i}.md"}, "score": 0.8 - i*0.1}
-                for i in range(min(top_k, 5))
-            ]
-            
-        def keyword_search(self, keyword, top_k=5, filter_criteria=None, match_type="contains"):
-            # Return dummy keyword search results
-            return [
-                {"content": f"Keyword content {i}", "metadata": {"source": f"keyword{i}.md"}, "score": 0.85 - i*0.05}
-                for i in range(min(top_k, 5))
-            ]
-            
-        def get_stats(self):
-            return {"total_documents": 100, "total_vectors": 500}
-            
-        def close(self):
-            pass
-    
-    logger.info("Initializing mock vector store for testing")
-    thread_local.vector_store = MockVectorStore()
+            # 最初のスレッドで初期化したらグローバル変数にも設定
+            if vector_store is None:
+                vector_store = thread_local.vector_store
+                
+        except Exception as e:
+            logger.error(f"Error initializing vector store: {e}")
+            raise
     
     # Set global variable
     if vector_store is None:

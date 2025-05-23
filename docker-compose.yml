@@ -4,7 +4,7 @@ services:
   mcp-server:
     build:
       context: .
-      dockerfile: docker/Dockerfile
+      dockerfile: docker/Dockerfile.fixed
     image: cursor-doc-rag-mcp:latest
     container_name: mcp-server
     ports:
@@ -31,7 +31,7 @@ services:
   file-watcher:
     build:
       context: .
-      dockerfile: docker/Dockerfile
+      dockerfile: docker/Dockerfile.fixed
     image: cursor-doc-rag-mcp:latest
     container_name: file-watcher
     volumes:
@@ -40,7 +40,9 @@ services:
       - ./vector_store:/app/vector_store
     env_file:
       - .env
-    command: start-file-watcher
+    command: python scripts/start_file_watcher.py --watch_dirs /app/data
+    environment:
+      - FALLBACK_TO_BASIC_SEARCH=true
     restart: unless-stopped
     depends_on:
       - mcp-server
@@ -52,7 +54,7 @@ services:
   scheduled-vectorization:
     build:
       context: .
-      dockerfile: docker/Dockerfile
+      dockerfile: docker/Dockerfile.fixed
     image: cursor-doc-rag-mcp:latest
     container_name: scheduled-vectorization
     volumes:

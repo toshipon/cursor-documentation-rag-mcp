@@ -1,15 +1,33 @@
-import sqlite3
 import os
 import json
 import time
 import hashlib
 import logging
+logger = logging.getLogger(__name__)
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 import config
+import sqlite3
 
-# ロギング設定
-logger = logging.getLogger(__name__)
+# Verify sqlite3 has load_extension capability
+has_load_extension = hasattr(sqlite3.Connection, 'load_extension')
+if has_load_extension:
+    logger.info("sqlite3 has load_extension capability")
+else:
+    logger.warning("sqlite3 does NOT have load_extension capability - vector search will not work properly")
+    
+# Check if we should force fallback mode
+force_fallback = getattr(config, 'FALLBACK_TO_BASIC_SEARCH', False)
+if force_fallback:
+    logger.info("Fallback to basic search is enabled via configuration")
+
+# Import fallback vector search implementation
+try:
+    from db.fallback_vector_search import FallbackVectorSearch
+    has_fallback_search = True
+except ImportError:
+    has_fallback_search = False
+    logging.warning("Fallback vector search implementation not available")
 
 class VectorStore:
     """
@@ -27,6 +45,7 @@ class VectorStore:
         """
         self.db_path = db_path
         self.vector_dimension = vector_dimension
+        self.has_vector_extension = False
         
         # DBディレクトリがなければ作成
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -34,11 +53,31 @@ class VectorStore:
         # SQLiteに接続
         self.conn = sqlite3.connect(db_path)
         
+        # Initialize fallback search if needed
+        self.fallback_search = None
+        if has_fallback_search:
+            self.fallback_search = FallbackVectorSearch(db_path)
+        
         # vss拡張モジュールをロード（存在しなければインストール）
-        self._load_vss_extension()
+        self.has_vector_extension = self._load_vss_extension()
         
         # テーブルを初期化
         self._init_db()
+        
+        # Initialize fallback search if vector extension isn't available
+        if self.fallback_search is not None:
+            try:
+                # Check if documents table exists and has rows
+                cursor = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='documents'")
+                if cursor.fetchone():
+                    # Check if table has any rows
+                    cursor = self.conn.execute("SELECT COUNT(*) FROM documents")
+                    count = cursor.fetchone()[0]
+                    if count > 0:
+                        # Only initialize if there's data
+                        self.fallback_search.initialize(self.conn)
+            except Exception as e:
+                logger.error(f"Error initializing fallback search: {e}")
         
         # インデックスを作成
         if create_indices:
@@ -47,23 +86,103 @@ class VectorStore:
         logger.info(f"VectorStore initialized at {db_path} with dimension {vector_dimension}")
     
     def _load_vss_extension(self):
-        """SQLite-VSS拡張をロードする"""
+        """
+        ベクトル検索拡張をロードする
+        
+        Returns:
+            bool: True if extension was loaded successfully, False otherwise
+        """
+        # Check if fallback is forced via environment or config
+        if getattr(config, 'FALLBACK_TO_BASIC_SEARCH', False):
+            logger.info("Fallback to basic search forced by configuration")
+            return False
+            
         try:
-            # sqlite-vss拡張をロード - 異なる方法を試みる
-            try:
-                # 方法1: 直接拡張機能を有効化
-                self.conn.enable_load_extension(True)
-                self.conn.load_extension("vss0")
-            except AttributeError:
-                # 方法2: sqlite-vssパッケージを使用
-                import sqlite_vss
-                sqlite_vss.load(self.conn)
-            logger.info("SQLite-VSS extension loaded successfully")
+            # sqlite-vec モジュールを使用
+            import sqlite_vec
+            # Check if custom library path is configured
+            custom_lib_path = getattr(config, 'SQLITE_VEC_LIB_PATH', None)
+            if custom_lib_path and os.path.exists(custom_lib_path):
+                try:
+                    # Try to load the extension from the custom path
+                    self.conn.enable_load_extension(True)
+                    self.conn.load_extension(custom_lib_path)
+                    logger.info(f"SQLite-Vec extension loaded from custom path: {custom_lib_path}")
+                    return True
+                except Exception as e:
+                    logger.warning(f"Failed to load from custom path: {e}, trying standard method")
+            
+            # Try standard method
+            sqlite_vec.load(self.conn)
+            logger.info("SQLite-Vec extension loaded successfully")
+            return True
+        except ImportError:
+            logger.warning("sqlite_vec module not available, vector search will be limited")
+            return self._try_manual_extension_loading()
         except Exception as e:
-            logger.error(f"Failed to load SQLite-VSS extension: {e}")
+            logger.error(f"Failed to load vector search extension: {e}")
             logger.info("Using basic SQLite functionality without vector search.")
-            # テスト用に機能を続行できるようにする
-            # 本番環境では適切なエラーハンドリングが必要
+            # Try manual loading as fallback
+            return self._try_manual_extension_loading()
+    
+    def _try_manual_extension_loading(self):
+        """
+        拡張モジュールを手動でロードする試行
+        
+        Returns:
+            bool: True if extension was loaded successfully, False otherwise
+        """
+        try:
+            if not has_load_extension:
+                logger.warning("This SQLite build does not support loading extensions")
+                return False
+            
+            # List of possible extension paths to try
+            extension_paths = [
+                # Mac paths
+                "/opt/homebrew/lib/sqlite-vec/vec0",  # Homebrew on Apple Silicon
+                "/usr/local/lib/sqlite-vec/vec0",     # Homebrew on Intel Mac
+                # Linux paths
+                "/usr/lib/sqlite-vec/vec0",
+                "/usr/local/lib/sqlite-vec/vec0",
+                # In-project path
+                os.path.join(os.path.dirname(__file__), "../lib/sqlite-vec/vec0")
+            ]
+            
+            # Add dylib for Mac OS
+            if os.uname().sysname == "Darwin":
+                mac_paths = []
+                for path in extension_paths:
+                    mac_paths.append(path + ".dylib")
+                extension_paths.extend(mac_paths)
+            
+            # Add Python site-packages path
+            try:
+                import site
+                for site_path in site.getsitepackages():
+                    extension_paths.append(os.path.join(site_path, "sqlite_vec", "vec0"))
+                    if os.uname().sysname == "Darwin":
+                        extension_paths.append(os.path.join(site_path, "sqlite_vec", "vec0.dylib"))
+            except (ImportError, AttributeError):
+                pass
+            
+            # Try to enable extensions and load from each path
+            self.conn.enable_load_extension(True)
+            for path in extension_paths:
+                try:
+                    if os.path.exists(path):
+                        self.conn.load_extension(path)
+                        logger.info(f"Successfully loaded extension from {path}")
+                        return True
+                except Exception:
+                    pass
+                    
+            logger.warning("Failed to load extension from any known paths")
+            return False
+        except Exception as e:
+            logger.error(f"Error in manual extension loading: {e}")
+            logger.info("Continuing with basic SQLite functionality")
+            return False
     
     def _init_db(self):
         """必要なテーブルとインデックスを初期化"""
@@ -92,18 +211,34 @@ class VectorStore:
         )
         ''')
         
-        # ベクトル類似度検索用のvssテーブルが存在するか確認
+        # ベクトル類似度検索用のテーブルが存在するか確認
         cursor = self.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='vss_documents'"
         )
         if not cursor.fetchone():
-            # vssテーブルを作成
-            self.conn.execute(f'''
-            CREATE VIRTUAL TABLE IF NOT EXISTS vss_documents USING vss0(
-                vector({self.vector_dimension}),
-                tokenize='porter'
-            )
-            ''')
+            # ベクトル検索テーブルを作成
+            try:
+                # sqlite-vec用の文法でテーブル作成
+                self.conn.execute(f'''
+                CREATE VIRTUAL TABLE IF NOT EXISTS vss_documents USING vec(
+                    document({self.vector_dimension})
+                )
+                ''')
+                logger.info("Created virtual table using vec extension")
+            except Exception as e:
+                logger.error(f"Failed to create vector search table: {e}")
+                # Instead of raising, create a fallback table for basic functionality
+                try:
+                    self.conn.execute('''
+                    CREATE TABLE IF NOT EXISTS vss_documents (
+                        rowid INTEGER PRIMARY KEY,
+                        document TEXT NOT NULL  -- Store vectors as JSON text
+                    )
+                    ''')
+                    logger.warning("Created fallback table for basic vector storage (no vector search functionality)")
+                except Exception as inner_e:
+                    logger.error(f"Failed to create fallback table: {inner_e}")
+                    raise
         
         self.conn.commit()
         logger.info("Database tables initialized")
@@ -194,10 +329,43 @@ class VectorStore:
                 doc_id = cursor.lastrowid
                 
                 # vssテーブルに挿入
-                self.conn.execute(
-                    "INSERT INTO vss_documents(rowid, vector) VALUES (?, ?)",
-                    (doc_id, vec)
-                )
+                if self.has_vector_extension:
+                    try:
+                        self.conn.execute(
+                            "INSERT INTO vss_documents(rowid, document) VALUES (?, ?)",
+                            (doc_id, vec)
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error inserting into vss_documents: {e}, using fallback tables")
+                        # Insert into fallback table if we have one
+                        self.conn.execute(
+                            "INSERT INTO vss_documents(rowid, document) VALUES (?, ?)",
+                            (doc_id, json.dumps(vec))
+                        )
+                else:
+                    # For non-vector extension mode, store as JSON
+                    self.conn.execute(
+                        "INSERT INTO vss_documents(rowid, document) VALUES (?, ?)",
+                        (doc_id, json.dumps(vec))
+                    )
+                
+                # Update fallback search if available
+                if self.fallback_search is not None:
+                    try:
+                        self.fallback_search.update_vector(
+                            doc_id, 
+                            vec, 
+                            {
+                                "id": doc_id,
+                                "content": doc["content"],
+                                "source": doc["metadata"]["source"],
+                                "source_type": doc["metadata"]["source_type"],
+                                "metadata": doc["metadata"]
+                            }
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error updating fallback search: {e}")
+                        # Continue anyway
             
             # ファイルメタデータも登録
             if file_path and os.path.exists(file_path):
@@ -234,27 +402,54 @@ class VectorStore:
         Returns:
             クエリ文字列とフィルタパラメータのタプル
         """
-        # 基本クエリの構築
-        query = """
-            SELECT 
-                d.id, d.content, d.source, d.source_type, d.metadata,
-                vss_documents.distance AS score
-            FROM 
-                vss_documents
-            JOIN 
-                documents d ON vss_documents.rowid = d.id
-            WHERE 
-                vss_documents.vector_search(?)
-        """
+        # Check if vector extension is available 
+        if self.has_vector_extension:
+            cursor = self.conn.execute("SELECT type FROM sqlite_master WHERE name='vss_documents'")
+            result = cursor.fetchone()
+            
+            # Check if it's a virtual table
+            is_virtual = False
+            if result and result[0] == 'table':
+                cursor = self.conn.execute("SELECT sql FROM sqlite_master WHERE name='vss_documents'")
+                table_def = cursor.fetchone()
+                if table_def:
+                    is_virtual = "VIRTUAL TABLE" in table_def[0].upper()
+        else:
+            is_virtual = False
+        
+        if is_virtual:
+            # Use vector search with vec extension
+            query = """
+                SELECT 
+                    d.id, d.content, d.source, d.source_type, d.metadata,
+                    vss_documents.distance AS score
+                FROM 
+                    vss_documents
+                JOIN 
+                    documents d ON vss_documents.rowid = d.id
+                WHERE 
+                    vss_documents.document match ?
+            """
+        else:
+            # Fallback method - get all documents and we'll compute similarity in Python
+            logger.info("Using fallback search method (no vector extension available)")
+            query = """
+                SELECT 
+                    d.id, d.content, d.source, d.source_type, d.metadata,
+                    vector
+                FROM 
+                    documents d
+            """
         
         # 共通のフィルタ構築メソッドを使用
         filter_query, filter_params = self._build_filter_clauses(filter_criteria)
         
         # フィルタリング条件を追加
         if filter_query:
-            query += f" AND {filter_query}"
-        
-        return query, filter_params
+            if "WHERE" in query:
+                query += f" AND {filter_query}"
+            else:
+                query += f" WHERE {filter_query}"
         
         return query, filter_params
 
@@ -275,36 +470,121 @@ class VectorStore:
             return []
         
         try:
+            # If we have a fallback search implementation and no vector extension,
+            # use the fallback implementation
+            if not self.has_vector_extension and self.fallback_search:
+                logger.info("Using fallback vector search implementation")
+                return self.fallback_search.similarity_search(
+                    query_vector, top_k=top_k, filter_criteria=filter_criteria
+                )
+            
+            # Otherwise proceed with SQLite-based search
+            # Check if vector extension is available
+            cursor = self.conn.execute("SELECT type FROM sqlite_master WHERE name='vss_documents'")
+            result = cursor.fetchone()
+            
+            # If vector table exists and is a virtual table, use vector search
+            is_virtual = False
+            if result and result[0] == 'table':
+                # Check if it's a virtual table
+                cursor = self.conn.execute("SELECT sql FROM sqlite_master WHERE name='vss_documents'")
+                table_def = cursor.fetchone()
+                is_virtual = table_def and "VIRTUAL TABLE" in table_def[0].upper() if table_def else False
+            
             # 検索クエリを構築
             query, filter_params = self._build_search_query(filter_criteria)
             
-            # 結果の制限を追加
-            query += " LIMIT ?"
-            
-            # クエリパラメータを準備
-            params = [query_vector] + filter_params + [top_k]
-            
-            # クエリ実行
-            cursor = self.conn.execute(query, params)
-            
-            # 結果を整形
-            results = []
-            for row in cursor.fetchall():
-                # JSON形式のメタデータをパース
-                metadata = json.loads(row[4])
+            if is_virtual:
+                # Vec extension is available, use it
+                # 結果の制限を追加
+                query += " LIMIT ?"
                 
-                results.append({
-                    "id": row[0],
-                    "content": row[1],
-                    "metadata": metadata,
-                    "score": row[5]  # 類似度スコア
-                })
+                # クエリパラメータを準備
+                params = [query_vector] + filter_params + [top_k]
                 
+                # クエリ実行
+                cursor = self.conn.execute(query, params)
+                
+                # 結果を整形
+                results = []
+                for row in cursor.fetchall():
+                    # JSON形式のメタデータをパース
+                    metadata = json.loads(row[4])
+                    
+                    results.append({
+                        "id": row[0],
+                        "content": row[1],
+                        "metadata": metadata,
+                        "score": row[5]  # 類似度スコア
+                    })
+            else:
+                # No vector extension, use basic method with full table scan and Python similarity calculation
+                logger.info("Using Python-based vector similarity search (basic method)")
+                
+                # クエリパラメータを準備
+                params = filter_params
+                
+                # クエリ実行 (get all documents)
+                cursor = self.conn.execute(query, params)
+                
+                # 結果を取得し、メモリ内で類似度計算
+                all_results = []
+                for row in cursor.fetchall():
+                    try:
+                                # Parse the vector from JSON
+                        vector_json = row[5]  # vector is in column 5
+                        doc_vector = json.loads(vector_json)
+                        
+                        # JSON形式のメタデータをパース
+                        metadata = json.loads(row[4]) if isinstance(row[4], str) else row[4]
+                        
+                        # Calculate cosine similarity
+                        score = self._calculate_cosine_similarity(query_vector, doc_vector)
+                        
+                        all_results.append({
+                            "id": row[0],
+                            "content": row[1],
+                            "metadata": metadata,
+                            "score": score
+                        })
+                    except Exception as e:
+                        logger.warning(f"Error calculating similarity for document {row[0]}: {e}")
+                        continue
+                
+                # Sort by score and limit to top_k
+                results = sorted(all_results, key=lambda x: x["score"], reverse=True)[:top_k]
+            
             return results
         
         except Exception as e:
             logger.error(f"Error during similarity search: {e}")
-            raise
+            # Return empty results rather than crashing
+            return []
+    
+    def _calculate_cosine_similarity(self, vec1, vec2):
+        """Calculate cosine similarity between two vectors"""
+        try:
+            import numpy as np
+            v1 = np.array(vec1)
+            v2 = np.array(vec2)
+            return np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+        except Exception:
+            # If numpy isn't available or calculation fails
+            # Fall back to a very simple similarity implementation
+            # Normalize vectors (convert to unit vectors)
+            def normalize(v):
+                from math import sqrt
+                mag = sqrt(sum(x*x for x in v))
+                return [x/mag for x in v]
+            
+            try:
+                v1 = normalize(vec1)
+                v2 = normalize(vec2)
+                # Dot product of unit vectors is cosine similarity
+                return sum(a*b for a, b in zip(v1, v2))
+            except:
+                # Last resort - return a default score
+                return 0.0
             
     def batch_similarity_search(self, query_vectors: List[List[float]], top_k: int = 5, filter_criteria: Dict[str, Any] = None) -> List[List[Dict[str, Any]]]:
         """
@@ -564,7 +844,7 @@ class VectorStore:
             JOIN 
                 documents d ON vss_documents.rowid = d.id
             WHERE 
-                vss_documents.vector_search(?)
+                vss_documents.document match ?
         """
 
         # フィルタリング条件を追加

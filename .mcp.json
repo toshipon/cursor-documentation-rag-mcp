@@ -1,0 +1,30 @@
+{
+  "name": "Cursor Vector Search Templates",
+  "description": "ドキュメント検索のためのMCPサーバー設定",
+  "version": "1.0.0",
+  "servers": [
+    {
+      "id": "cursor-templates-vss-server",
+      "name": "Cursor Vector Search Server",
+      "url": "http://localhost:8000",
+      "capabilities": {
+        "completion": true,
+        "document-search": true
+      }
+    }
+  ],
+  "defaultServer": "cursor-templates-vss-server",
+  "searchConfig": {
+    "documentSearch": {
+      "topK": 5,
+      "filters": {
+        "sourceTypes": ["pdf"]
+      }
+    }
+  },
+  "completion": {
+    "model": "default",
+    "temperature": 0.7,
+    "maxTokens": 1024
+  }
+}

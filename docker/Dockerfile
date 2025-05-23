@@ -6,10 +6,25 @@ RUN apt-get update && \
   build-essential \
   git \
   curl \
+  libgomp1 libatlas-base-dev liblapack-dev \
+  sqlite3 \
+  sqlite3-dev \
+  python3-dev \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
+# Build and install sqlite-vec from source for the proper architecture
+RUN cd /tmp && \
+  git clone https://github.com/asg017/sqlite-vec.git && \
+  cd sqlite-vec && \
+  make loadable && \
+  mkdir -p /usr/local/lib/sqlite-vec/ && \
+  cp dist/debug/vec0.so /usr/local/lib/sqlite-vec/ && \
+  chmod +x /usr/local/lib/sqlite-vec/vec0.so
+
 WORKDIR /app
+
+RUN pip install --upgrade pip
 
 # Copy requirements and install dependencies
 COPY requirements.txt .
@@ -20,7 +35,9 @@ RUN pip install --no-cache-dir \
   uvloop \
   httptools \
   gunicorn \
-  cachetools
+  cachetools \
+  huggingface-hub==0.19.4 \
+  transformers==4.36.1
 
 # Copy application code
 COPY . .
@@ -38,6 +55,10 @@ ENV PYTHONOPTIMIZE=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONIOENCODING=UTF-8
+
+# Set environment variables for vector extension
+ENV SQLITE_VEC_LIB_PATH=/usr/local/lib/sqlite-vec/vec0.so
+ENV FALLBACK_TO_BASIC_SEARCH=true
 
 # Expose ports for MCP server
 EXPOSE 8000

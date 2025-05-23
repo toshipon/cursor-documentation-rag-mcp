@@ -6,11 +6,50 @@ mkdir -p /app/data
 mkdir -p /app/models
 mkdir -p /app/vector_store
 
+# Function to check if SQLite vector extension is working
+check_sqlite_vec() {
+    echo "Checking SQLite vector extension..."
+    python -c "
+import sqlite3
+try:
+    conn = sqlite3.connect(':memory:')
+    conn.enable_load_extension(True)
+    conn.load_extension('$SQLITE_VEC_LIB_PATH')
+    conn.execute('CREATE VIRTUAL TABLE vss_test USING vec(document(3))')
+    conn.execute(\"INSERT INTO vss_test(rowid, document) VALUES (1, '[1.0, 0.0, 0.0]')\")
+    print('SQLite vector extension loaded successfully!')
+    exit(0)
+except Exception as e:
+    print(f'Error loading SQLite vector extension: {e}')
+    exit(1)
+"
+    return $?
+}
+
+# Setup SQLite vector extension
+if [ -f "$SQLITE_VEC_LIB_PATH" ]; then
+    if check_sqlite_vec; then
+        echo "Vector search extension loaded and working properly."
+        export FALLBACK_TO_BASIC_SEARCH=false
+    else
+        echo "Vector search extension found but not working. Using fallback implementation."
+        export FALLBACK_TO_BASIC_SEARCH=true
+    fi
+else
+    echo "Vector search extension not found at $SQLITE_VEC_LIB_PATH. Using fallback implementation."
+    export FALLBACK_TO_BASIC_SEARCH=true
+fi
+
 # Download PLaMo model if it doesn't exist
-if [ ! -f "/app/models/plamo-embedding-1b/config.json" ]; then
+if [ ! -f "/app/models/plamo-embedding-1b/pytorch_model.bin" ] && [ ! -f "/app/models/plamo-embedding-1b/model.safetensors" ]; then
     echo "Downloading PLaMo-Embedding-1B model..."
-    python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='pfnet/plamo-embedding-1b', local_dir='/app/models/plamo-embedding-1b')"
-    echo "Model downloaded successfully"
+    python /app/scripts/download_model.py --model-path /app/models/plamo-embedding-1b
+    
+    # Check if the download was successful
+    if [ ! -f "/app/models/plamo-embedding-1b/pytorch_model.bin" ] && [ ! -f "/app/models/plamo-embedding-1b/model.safetensors" ]; then
+        echo "ERROR: Failed to download model weights. Please check network connectivity and try again."
+        exit 1
+    fi
 fi
 
 # Command mapping
@@ -27,7 +66,7 @@ function start-mcp-server() {
 
 function start-file-watcher() {
     echo "Starting File Watcher..."
-    exec python scripts/start_file_watcher.py
+    exec python scripts/start_file_watcher.py "$@"
 }
 
 function scheduled-vectorization() {
