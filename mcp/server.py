@@ -16,6 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from vectorize.embeddings import PLaMoEmbedder, DummyEmbedder
 from db.vector_store import VectorStore
+from db.qdrant_store import QdrantVectorStore
 from mcp.monitoring import MCPMonitor
 
 # ロギング設定
@@ -156,15 +157,32 @@ def get_vector_store():
     # スレッドローカルにない場合は初期化
     if not hasattr(thread_local, 'vector_store'):
         try:
-            logger.info(f"Initializing VectorStore with DB path: {config.VECTOR_DB_PATH}")
-            # モデルの埋め込み次元数を取得
-            embedder = get_embedder()
-            vector_dimension = embedder.get_dimension() if hasattr(embedder, 'get_dimension') else 2048
+            vector_store_type = os.getenv("VECTOR_STORE_TYPE", "sqlite")
             
-            thread_local.vector_store = VectorStore(
-                db_path=config.VECTOR_DB_PATH,
-                vector_dimension=vector_dimension
-            )
+            if vector_store_type.lower() == "qdrant":
+                logger.info("Initializing Qdrant vector store for MCP server")
+                qdrant_url = os.getenv("QDRANT_URL", "http://qdrant:6334")
+                collection_name = os.getenv("QDRANT_COLLECTION", "documents")
+                
+                # モデルの埋め込み次元数を取得
+                embedder = get_embedder()
+                vector_dimension = embedder.get_dimension() if hasattr(embedder, 'get_dimension') else 512
+                
+                thread_local.vector_store = QdrantVectorStore(
+                    url=qdrant_url,
+                    collection_name=collection_name,
+                    vector_dimension=vector_dimension
+                )
+            else:
+                logger.info(f"Initializing SQLite VectorStore with DB path: {config.VECTOR_DB_PATH}")
+                # モデルの埋め込み次元数を取得
+                embedder = get_embedder()
+                vector_dimension = embedder.get_dimension() if hasattr(embedder, 'get_dimension') else 2048
+                
+                thread_local.vector_store = VectorStore(
+                    db_path=config.VECTOR_DB_PATH,
+                    vector_dimension=vector_dimension
+                )
             
             # 最初のスレッドで初期化したらグローバル変数にも設定
             if vector_store is None:

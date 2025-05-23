@@ -1,7 +1,17 @@
 version: "3.8"
 
+volumes:
+  qdrant_data:
+    driver: local
+
+networks:
+  docsearch-net:
+    driver: bridge
+
 services:
   mcp-server:
+    networks:
+      - docsearch-net
     build:
       context: .
       dockerfile: docker/Dockerfile.fixed
@@ -19,8 +29,11 @@ services:
       - WORKERS=${WORKERS:-4}
       - BATCH_SIZE=${BATCH_SIZE:-16}
       - MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-32}
+      - QDRANT_URL=http://qdrant:6334
     command: start-mcp-server
     restart: unless-stopped
+    depends_on:
+      - qdrant
     deploy:
       resources:
         limits:
@@ -29,6 +42,8 @@ services:
           memory: 1g
 
   file-watcher:
+    networks:
+      - docsearch-net
     build:
       context: .
       dockerfile: docker/Dockerfile.fixed
@@ -43,13 +58,28 @@ services:
     command: python scripts/start_file_watcher.py --watch_dirs /app/data
     environment:
       - FALLBACK_TO_BASIC_SEARCH=true
+      - QDRANT_URL=http://qdrant:6334
+      - VECTOR_STORE_TYPE=qdrant
     restart: unless-stopped
     depends_on:
+      - qdrant
       - mcp-server
     deploy:
       resources:
         limits:
           memory: ${FILE_WATCHER_MEMORY:-1g}
+
+  qdrant:
+    image: qdrant/qdrant:v1.7.4
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - docsearch-net
+    restart: unless-stopped
 
   scheduled-vectorization:
     build:

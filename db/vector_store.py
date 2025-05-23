@@ -5,7 +5,7 @@ import hashlib
 import logging
 logger = logging.getLogger(__name__)
 import numpy as np
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 import config
 import sqlite3
 
@@ -29,12 +29,23 @@ except ImportError:
     has_fallback_search = False
     logging.warning("Fallback vector search implementation not available")
 
+# Try to import Qdrant vector store
+try:
+    from db.qdrant_store import QdrantVectorStore
+    has_qdrant = True
+    logger.info("Qdrant vector store implementation is available")
+except ImportError:
+    has_qdrant = False
+    logger.warning("Qdrant vector store implementation not available")
+
 class VectorStore:
     """
-    SQLite-VSSを利用したベクトルストアクラス
+    ベクトルストアクラス
     テキストデータとベクトルを保存し、ベクトル類似度検索を行う
+    SQLiteとQdrantバックエンドを選択可能
     """
-    def __init__(self, db_path: str, vector_dimension: int = 512, create_indices: bool = True):
+    def __init__(self, db_path: str, vector_dimension: int = 512, create_indices: bool = True, 
+                 vector_store_type: str = None):
         """
         初期化
         
@@ -42,48 +53,75 @@ class VectorStore:
             db_path: データベースファイルのパス
             vector_dimension: ベクトルの次元数
             create_indices: インデックスを自動作成するかどうか
+            vector_store_type: ベクトルストアの種類 ("sqlite", "qdrant")
         """
         self.db_path = db_path
         self.vector_dimension = vector_dimension
+        self.vector_store_type = vector_store_type or os.getenv("VECTOR_STORE_TYPE", "sqlite")
         self.has_vector_extension = False
         
-        # DBディレクトリがなければ作成
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        
-        # SQLiteに接続
-        self.conn = sqlite3.connect(db_path)
-        
-        # Initialize fallback search if needed
+        # SQLiteベクトルストアのコンポーネント
+        self.conn = None
         self.fallback_search = None
-        if has_fallback_search:
-            self.fallback_search = FallbackVectorSearch(db_path)
         
-        # vss拡張モジュールをロード（存在しなければインストール）
-        self.has_vector_extension = self._load_vss_extension()
+        # Qdrantベクトルストア
+        self.qdrant_store = None
         
-        # テーブルを初期化
-        self._init_db()
-        
-        # Initialize fallback search if vector extension isn't available
-        if self.fallback_search is not None:
+        if self.vector_store_type.lower() == "qdrant" and has_qdrant:
+            # Qdrantベクトルストアを使用
+            logger.info(f"Using Qdrant vector store with dimension {vector_dimension}")
             try:
-                # Check if documents table exists and has rows
-                cursor = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='documents'")
-                if cursor.fetchone():
-                    # Check if table has any rows
-                    cursor = self.conn.execute("SELECT COUNT(*) FROM documents")
-                    count = cursor.fetchone()[0]
-                    if count > 0:
-                        # Only initialize if there's data
-                        self.fallback_search.initialize(self.conn)
+                self.qdrant_store = QdrantVectorStore(
+                    url=os.getenv("QDRANT_URL", "http://qdrant:6334"),
+                    collection_name="documents",
+                    vector_dimension=vector_dimension
+                )
+                logger.info("Successfully initialized Qdrant vector store")
             except Exception as e:
-                logger.error(f"Error initializing fallback search: {e}")
-        
-        # インデックスを作成
-        if create_indices:
-            self.create_indices()
-        
-        logger.info(f"VectorStore initialized at {db_path} with dimension {vector_dimension}")
+                logger.error(f"Failed to initialize Qdrant vector store: {e}")
+                logger.warning("Falling back to SQLite vector store")
+                self.vector_store_type = "sqlite"
+                
+        if self.vector_store_type.lower() == "sqlite" or not self.qdrant_store:
+            # SQLiteベクトルストアを使用
+            logger.info(f"Using SQLite vector store with dimension {vector_dimension}")
+            
+            # DBディレクトリがなければ作成
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            
+            # SQLiteに接続
+            self.conn = sqlite3.connect(db_path)
+            
+            # Initialize fallback search if needed
+            if has_fallback_search:
+                self.fallback_search = FallbackVectorSearch(db_path)
+            
+            # vss拡張モジュールをロード（存在しなければインストール）
+            self.has_vector_extension = self._load_vss_extension()
+            
+            # テーブルを初期化
+            self._init_db()
+            
+            # Initialize fallback search if vector extension isn't available
+            if self.fallback_search is not None:
+                try:
+                    # Check if documents table exists and has rows
+                    cursor = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='documents'")
+                    if cursor.fetchone():
+                        # Check if table has any rows
+                        cursor = self.conn.execute("SELECT COUNT(*) FROM documents")
+                        count = cursor.fetchone()[0]
+                        if count > 0:
+                            # Only initialize if there's data
+                            self.fallback_search.initialize(self.conn)
+                except Exception as e:
+                    logger.error(f"Error initializing fallback search: {e}")
+            
+            # インデックスを作成
+            if create_indices:
+                self.create_indices()
+            
+            logger.info(f"SQLite VectorStore initialized at {db_path} with dimension {vector_dimension}")
     
     def _load_vss_extension(self):
         """
@@ -303,6 +341,11 @@ class VectorStore:
             raise ValueError(f"Number of documents ({len(docs)}) doesn't match number of vectors ({len(vectors)})")
         
         now = int(time.time())
+        # Qdrantが設定されていれば、そちらを使用
+        if self.vector_store_type.lower() == "qdrant" and self.qdrant_store:
+            return self.qdrant_store.add_documents(docs, vectors, file_path)
+        
+        # SQLiteストアを使用
         try:
             # トランザクション開始
             self.conn.execute("BEGIN")
@@ -384,12 +427,12 @@ class VectorStore:
             
             # コミット
             self.conn.commit()
-            logger.info(f"Added {len(docs)} documents to vector store")
+            logger.info(f"Added {len(docs)} documents to SQLite vector store")
             
         except Exception as e:
             # エラー発生時はロールバック
             self.conn.rollback()
-            logger.error(f"Error adding documents to vector store: {e}")
+            logger.error(f"Error adding documents to SQLite vector store: {e}")
             raise
 
     def _build_search_query(self, filter_criteria: Dict[str, Any] = None) -> Tuple[str, List[Any]]:
@@ -469,6 +512,11 @@ class VectorStore:
             logger.warning("Empty query vector provided to similarity_search")
             return []
         
+        # Qdrantが設定されていれば、そちらを使用
+        if self.vector_store_type.lower() == "qdrant" and self.qdrant_store:
+            return self.qdrant_store.similarity_search(query_vector, top_k, filter_criteria)
+        
+        # SQLiteストアを使用
         try:
             # If we have a fallback search implementation and no vector extension,
             # use the fallback implementation
@@ -557,7 +605,7 @@ class VectorStore:
             return results
         
         except Exception as e:
-            logger.error(f"Error during similarity search: {e}")
+            logger.error(f"Error during SQLite similarity search: {e}")
             # Return empty results rather than crashing
             return []
     
@@ -713,6 +761,11 @@ class VectorStore:
         Returns:
             削除されたドキュメント数
         """
+        # Qdrantが設定されていれば、そちらを使用
+        if self.vector_store_type.lower() == "qdrant" and self.qdrant_store:
+            return self.qdrant_store.delete_file(file_path)
+        
+        # SQLiteストアを使用
         try:
             # トランザクション開始
             self.conn.execute("BEGIN")
@@ -759,7 +812,7 @@ class VectorStore:
         except Exception as e:
             # エラー発生時はロールバック
             self.conn.rollback()
-            logger.error(f"Error deleting file from vector store: {e}")
+            logger.error(f"Error deleting file from SQLite vector store: {e}")
             return 0
     
     def get_stats(self) -> Dict[str, Any]:
@@ -801,7 +854,11 @@ class VectorStore:
         """データベース接続を閉じる"""
         if self.conn:
             self.conn.close()
-            logger.info("Database connection closed")
+            logger.info("SQLite database connection closed")
+        
+        if self.qdrant_store:
+            self.qdrant_store.close()
+            logger.info("Qdrant connection closed")
     
     def hybrid_search(self, 
                 query_text: str, 

@@ -11,6 +11,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
 from db.vector_store import VectorStore
+from db.qdrant_store import QdrantVectorStore
 from vectorize.embeddings import PLaMoEmbedder, DummyEmbedder
 from vectorize.processors.markdown_processor import process_markdown_file
 from vectorize.processors.pdf_processor import process_pdf_file
@@ -86,9 +87,21 @@ class VectorizationWorker:
         """リソースを初期化"""
         # ベクトルストアを初期化
         if self.vector_store is None:
-            logger.info(f"Initializing vector store at {self.vector_store_path}")
-            os.makedirs(os.path.dirname(self.vector_store_path), exist_ok=True)
-            self.vector_store = VectorStore(self.vector_store_path, self.vector_dimension)
+            vector_store_type = os.getenv("VECTOR_STORE_TYPE", "sqlite")
+            
+            if vector_store_type.lower() == "qdrant":
+                logger.info("Initializing Qdrant vector store")
+                qdrant_url = os.getenv("QDRANT_URL", "http://qdrant:6334")
+                collection_name = os.getenv("QDRANT_COLLECTION", "documents")
+                self.vector_store = QdrantVectorStore(
+                    url=qdrant_url,
+                    collection_name=collection_name,
+                    vector_dimension=self.vector_dimension
+                )
+            else:
+                logger.info(f"Initializing SQLite vector store at {self.vector_store_path}")
+                os.makedirs(os.path.dirname(self.vector_store_path), exist_ok=True)
+                self.vector_store = VectorStore(self.vector_store_path, self.vector_dimension)
         
         # 埋め込みモデルを初期化
         if self.embedder is None:

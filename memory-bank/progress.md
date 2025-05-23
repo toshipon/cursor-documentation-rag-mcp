@@ -17,7 +17,9 @@
   - [x] MarkdownTextSplitter の実装
   - [x] 適切なチャンクサイズの検証
   - [x] メタデータ抽出ロジックの実装
-- [x] SQLite-VSS のセットアップ
+- [x] ベクトルデータベースのセットアップ
+  - [x] SQLite-VSS のセットアップ (初期実装)
+  - [x] Qdrant によるベクター検索の実装 (Docker 環境)
   - [x] テーブルスキーマの設計
   - [x] ベクトル検索機能の実装
   - [x] CRUD 操作の実装
@@ -90,6 +92,7 @@
   uvicorn==0.23.2
   langchain==0.0.267
   sqlite-vss==0.1.2
+  qdrant-client==1.7.0
   huggingface-hub==0.16.4
   transformers==4.33.2
   torch==2.0.1
@@ -138,13 +141,20 @@
 
 ### ベクトルデータベース
 
-#### SQLite-VSS 設定
+#### ベクトルデータベース設定
 
-- [x] vector_store.py を実装
+- [x] SQLite-VSS
+  - [x] vector_store.py を実装
   - [x] DB コネクション管理
   - [x] テーブルスキーマ定義
   - [x] ベクトル保存機能
   - [x] 類似検索機能
+  
+- [x] Qdrant 
+  - [x] qdrant_store.py を実装
+  - [x] Docker コンテナ統合
+  - [x] コレクション設計
+  - [x] 分散検索機能
 
 #### メタデータ管理
 
@@ -336,9 +346,10 @@
 
 ### ベクトルデータベース
 
-#### SQLite-VSS 設定
+#### ベクトルデータベース設定
 
-- [ ] vector_store.py を実装
+- [ ] SQLite-VSS
+  - [ ] vector_store.py を実装
   - [ ] DB コネクション管理
   - [ ] テーブルスキーマ定義
   - [ ] ベクトル保存機能
@@ -408,14 +419,14 @@
 1. **基本プロトタイプ (Week 2 終了)**
 
    - 基本的な Markdown ファイル処理
-   - SQLite-VSS による検索
+   - ベクターデータベース (SQLite-VSS) による検索
    - シンプルな MCP エンドポイント
 
 2. **拡張プロトタイプ (Week 4 終了)**
 
    - 複数ファイルタイプの処理
    - 自動取り込み機能
-   - Docker 環境
+   - Docker 環境と Qdrant ベクターデータベース統合
 
 3. **最終リリース (Week 6 終了)**
    - パフォーマンス最適化
