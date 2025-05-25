@@ -232,6 +232,12 @@ class DocumentEventHandler(FileSystemEventHandler):
                     'action': action_for_queue
                 }
                 events_to_queue.append(task)
+                
+                # Update last_events for this path to the current flush time.
+                # This means that after this event is queued, subsequent events for the
+                # same file path will only be considered after debounce_seconds from current_time.
+                self.last_events[internal_event.file_path] = current_time
+                
                 self.pending_events.remove(internal_event)
                 processed_paths_in_batch.add(internal_event.file_path)
         
