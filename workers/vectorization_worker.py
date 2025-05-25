@@ -49,10 +49,12 @@ PROCESSOR_CLASSES = {
 }
 
 # Dynamically add code processors using the wrapper
+# Since process_code_file determines language from file_path and FunctionalProcessorWrapper
+# doesn't need ext explicitly, the lambda can be simplified.
+# This factory will create a new wrapper instance each time it's called.
+common_code_wrapper_factory = lambda: FunctionalProcessorWrapper(process_code_file)
 for ext in CODE_FILE_EXTENSIONS.keys():
-    PROCESSOR_CLASSES[ext] = lambda lang_ext=ext: FunctionalProcessorWrapper(process_code_file) 
-    # Note: process_code_file itself detects language from extension.
-    # If process_code_file needed specific args per language, lambda would capture them.
+    PROCESSOR_CLASSES[ext] = common_code_wrapper_factory
 
 class VectorizationWorker:
     """ファイル変更を検出して自動的にベクトル化するワーカー"""
@@ -234,10 +236,17 @@ class VectorizationWorker:
             if delete_count > 0:
                 logger.info(f"Deleted {delete_count} existing documents for {file_path} before update.")
 
+            # Ensure each chunk's metadata includes the source (file_path)
+            for chunk in valid_chunks:
+                if "metadata" not in chunk:
+                    chunk["metadata"] = {}
+                if "source" not in chunk["metadata"]: # Only set if not already present
+                    chunk["metadata"]["source"] = file_path
+            
             # Add the new documents (valid_chunks with their vectors) to the vector store
             # The add_documents method needs to associate vectors with their respective chunks.
             # It should handle the 'metadata' from each chunk.
-            self.vector_store.add_documents(valid_chunks, vectors) # Removed file_path, assume it's in metadata
+            self.vector_store.add_documents(valid_chunks, vectors)
 
             elapsed = time.time() - start_time
             logger.info(f"Successfully processed (updated) {file_path} in {elapsed:.2f} seconds. Added {len(valid_chunks)} chunks.")

@@ -17,12 +17,13 @@ import config
 logging.basicConfig(level=getattr(logging, config.LOG_LEVEL))
 logger = logging.getLogger(__name__)
 
-# ベクトル化対象のファイル拡張子 (config.py から読み込むように変更)
-SUPPORTED_EXTENSIONS = getattr(config, 'SUPPORTED_EXTENSIONS', {
-    '.md', '.markdown',
-    '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.c', '.cpp', '.cs', '.go', '.rb', '.php', '.swift', '.kt', '.rs',
-    '.pdf'
-})
+# Default supported extensions if not provided by config or constructor
+DEFAULT_SUPPORTED_EXTENSIONS = {
+    '.md', '.markdown', '.txt', '.log', '.pdf', '.json', '.yaml', '.yml',
+    '.py', '.js', '.ts', '.java', '.c', '.cpp', '.h', '.hpp', '.cs', '.go',
+    '.php', '.rb', '.swift', '.kt', '.scala', '.rs', '.lua', '.pl', '.sh',
+    '.html', '.htm', '.css', '.scss', '.less', '.xml', '.toml', '.ini', '.cfg', '.conf'
+}
 
 class _InternalChangeEvent:
     """内部処理用のファイル変更イベントを表すクラス (デバウンス処理用)"""
@@ -69,7 +70,20 @@ class DocumentEventHandler(FileSystemEventHandler):
         self.event_queue = event_queue
         self.ignored_patterns = ignored_patterns or []
         self.debounce_seconds = debounce_seconds
-        self.supported_extensions = supported_extensions or SUPPORTED_EXTENSIONS
+        
+        if supported_extensions is not None:
+            self.supported_extensions = set(supported_extensions)
+        else:
+            cfg_extensions = getattr(config, 'SUPPORTED_EXTENSIONS', None)
+            if cfg_extensions is not None:
+                self.supported_extensions = set(cfg_extensions)
+                logger.info("Using SUPPORTED_EXTENSIONS from config.py")
+            else:
+                self.supported_extensions = DEFAULT_SUPPORTED_EXTENSIONS
+                logger.info("Using DEFAULT_SUPPORTED_EXTENSIONS from file_watcher.py")
+        
+        logger.debug(f"DocumentEventHandler initialized with extensions: {self.supported_extensions}")
+
         self.last_events: Dict[str, float] = {}  # ファイルパスごとの最終イベント時刻
         self.pending_events: Set[_InternalChangeEvent] = set()  # 保留中の内部イベント
         
@@ -299,16 +313,18 @@ class FileWatcher:
         self.watched_dirs = [os.path.abspath(d) for d in watched_dirs]
         self.event_queue = event_queue
         self.ignored_patterns = ignored_patterns or []
-        # Use provided supported_extensions or load from global/config
-        self.supported_extensions = supported_extensions or SUPPORTED_EXTENSIONS
+        # The supported_extensions logic is now primarily in DocumentEventHandler.
+        # FileWatcher's own self.supported_extensions is mainly for record-keeping or if create_file_watcher needs it.
+        # DocumentEventHandler will handle the fallback chain for its own instance of supported_extensions.
+        self.supported_extensions_arg = supported_extensions # Keep the argument for clarity if needed by create_file_watcher
         self.recursive = recursive
         self.debounce_seconds = debounce_seconds
         
         self.observer = Observer()
-        self.handler = DocumentEventHandler( # Renamed from FileChangeHandler
+        self.handler = DocumentEventHandler( 
             event_queue=self.event_queue,
             ignored_patterns=self.ignored_patterns,
-            supported_extensions=self.supported_extensions,
+            supported_extensions=supported_extensions, # Pass the argument directly to the handler
             debounce_seconds=self.debounce_seconds
         )
         
@@ -378,14 +394,15 @@ def create_file_watcher(watched_dirs: List[str],
     Returns:
         FileWatcherのインスタンス
     """
-    # Ensure config is loaded for default SUPPORTED_EXTENSIONS if not provided
-    final_supported_extensions = supported_extensions or getattr(config, 'SUPPORTED_EXTENSIONS', {'.pdf'})
-    
+    # The supported_extensions argument is passed directly to FileWatcher,
+    # which then passes it to DocumentEventHandler.
+    # DocumentEventHandler now contains the robust fallback logic.
+    # No need for complex fallback here in create_file_watcher itself for this specific parameter.
     return FileWatcher(
         watched_dirs=watched_dirs,
         event_queue=event_queue,
         ignored_patterns=ignored_patterns,
-        supported_extensions=final_supported_extensions,
+        supported_extensions=supported_extensions, # Pass through; handler will use its fallback
         recursive=recursive,
         debounce_seconds=debounce_seconds
     )

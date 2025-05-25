@@ -608,39 +608,42 @@ class PDFProcessor:
 
 # Example Usage (optional, for testing purposes)
 if __name__ == '__main__':
-    # Configure basic logging for testing
-    logging.basicConfig(level=logging.INFO)
-    
-    # Create a dummy PDF file for testing
-    # In a real scenario, you would have a PDF file path.
-    dummy_pdf_path = "sample_documents/sample.pdf" # Assuming this was created in a previous step
-    
-    # Create dummy PDF if it doesn't exist (simplified for example)
-    if not os.path.exists(dummy_pdf_path):
-        os.makedirs("sample_documents", exist_ok=True)
-        try:
-            with pdfplumber.open(dummy_pdf_path, "w") as pdf: # This is not how pdfplumber creates PDFs
-                 # This is a placeholder. pdfplumber is for reading.
-                 # For a real test, you'd need an actual PDF file.
-                 # For now, we'll simulate a simple text extraction.
-                 pass
-            # For testing, let's assume a simple text extraction logic here
-            # or use a pre-existing PDF. The following lines would be part of PDF creation.
-            # For this example, we will rely on the PDF created in the previous subtask.
-            logger.info(f"Created a dummy PDF for testing: {dummy_pdf_path} - Please replace with a real PDF.")
+    import os
+    from pprint import pprint
 
-    if os.path.exists(dummy_pdf_path):
-        processor = PDFProcessor()
-        extracted_data = processor.process_file(dummy_pdf_path)
-        
-        if extracted_data:
-            logger.info(f"Successfully extracted data from {dummy_pdf_path}:")
-            for chunk in extracted_data:
-                logger.info(f"  Page {chunk['metadata']['page_number']}: {chunk['text'][:100]}...") # Print first 100 chars
+    # Configure basic logging for the example
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    # Construct path to the sample PDF relative to this script's location
+    # This script is in vectorize/processors/pdf_processor.py
+    # We want to reach sample_documents/sample.pdf at the repository root.
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.abspath(os.path.join(script_dir, '..', '..')) 
+        sample_pdf_path = os.path.join(repo_root, 'sample_documents', 'sample.pdf')
+
+        if not os.path.exists(sample_pdf_path):
+            print(f"Error: Sample PDF not found at '{sample_pdf_path}'")
+            print("Please ensure 'sample_documents/sample.pdf' exists in the repository root.")
+            print("This PDF should have been created by a previous subtask.")
         else:
-            logger.warning(f"No data extracted from {dummy_pdf_path}. Ensure it's a valid PDF with text.")
-    else:
-        logger.error(f"Test PDF file not found: {dummy_pdf_path}. Cannot run example.")
+            processor = PDFProcessor()
+            print(f"Attempting to process PDF: {sample_pdf_path}")
+            
+            extracted_chunks = processor.process_file(sample_pdf_path)
+            
+            if extracted_chunks:
+                print(f"\nSuccessfully extracted {len(extracted_chunks)} chunk(s) from '{sample_pdf_path}':")
+                for i, chunk_data in enumerate(extracted_chunks):
+                    print(f"\n--- Chunk {i+1} ---")
+                    pprint(chunk_data)
+            else:
+                print(f"No data extracted from '{sample_pdf_path}'. "
+                      "The PDF might be empty, contain only images, or there might have been an issue.")
 
-# Ensure pdfplumber is installed
-# You might need to run: pip install pdfplumber
+    except Exception as e:
+        print(f"An error occurred during the PDF processing example: {e}")
+        import traceback
+        traceback.print_exc()
+
+# Ensure pdfplumber is installed: pip install pdfplumber
