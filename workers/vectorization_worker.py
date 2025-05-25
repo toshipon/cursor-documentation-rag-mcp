@@ -182,7 +182,22 @@ class VectorizationWorker:
                 self.vector_store.delete_file(file_path)
             
             # テキストをベクトル化
-            texts = [d["content"] for d in docs]
+            texts = []
+            for i, doc in enumerate(docs):
+                text = doc.get("text", doc.get("content", "")).strip()
+                if not text:
+                    logger.warning(f"Empty text in chunk {i} from {file_path}")
+                    continue
+                texts.append(text)
+
+            if not texts:
+                logger.error(f"No valid text content found in any chunks from {file_path}")
+                return False
+
+            # テキストの長さをログに出力
+            for i, text in enumerate(texts):
+                logger.debug(f"Chunk {i} from {file_path}: {len(text)} characters")
+
             vectors = self.embedder.embed_batch(texts)
             
             # ベクトルストアに保存

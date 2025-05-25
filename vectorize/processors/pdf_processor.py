@@ -1,233 +1,537 @@
 import os
 import logging
 import pdfplumber
-import gc
-import traceback
-from typing import List, Dict, Any
-from vectorize.text_splitters import BaseTextSplitter
-import config
+from typing import List, Dict, Any, Tuple, Optional
+import re
+from collections import defaultdict
+import unicodedata
+from dataclasses import dataclass, field
 
-# ロギング設定
 logger = logging.getLogger(__name__)
 
-def extract_text_from_pdf(file_path: str) -> List[Dict[str, Any]]:
-    """
-    PDFからテキストとメタデータを抽出
-    
-    Args:
-        file_path: PDFファイルのパス
-        
-    Returns:
-        各ページのテキストとメタデータのリスト
-    """
-    logger.info(f"Extracting text from PDF: {file_path}")
-    
-    pages = []
-    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    
-    try:
-        with pdfplumber.open(file_path) as pdf:
-            # PDFのメタデータを取得（存在すれば）
-            pdf_metadata = pdf.metadata or {}
-            total_pages = len(pdf.pages)
-            
-            # ファイルサイズに基づいてバッチサイズを調整
-            if file_size_mb > 100:
-                batch_size = 10  # 非常に大きいPDFの場合
-            elif file_size_mb > 50:
-                batch_size = 20  # 大きいPDFの場合
-            elif file_size_mb > 30:
-                batch_size = 30  # 中程度のPDFの場合
-            else:
-                batch_size = 50  # 標準的なPDFの場合
-                
-            logger.info(f"PDF size: {file_size_mb:.1f} MB, {total_pages} pages, using batch size of {batch_size} pages")
-            
-            # 進捗表示の頻度を設定
-            progress_interval = max(1, total_pages // 10)
-            
-            # メモリ消費を減らすためにページごとにメモリをクリア
-            for batch_start in range(0, total_pages, batch_size):
-                batch_end = min(batch_start + batch_size, total_pages)
-                logger.info(f"Extracting pages {batch_start+1} to {batch_end} of {total_pages}")
-                
-                batch_pages = []
-                for i in range(batch_start, batch_end):
-                    try:
-                        page = pdf.pages[i]
-                        page_text = page.extract_text() or ""
-                        
-                        # ページ情報
-                        page_info = {
-                            "page_number": i + 1,
-                            "page_total": total_pages,
-                            "width": page.width,
-                            "height": page.height
-                        }
-                        
-                        batch_pages.append({
-                            "text": page_text,
-                            "metadata": {
-                                **page_info,
-                                "pdf_title": pdf_metadata.get("Title", ""),
-                                "pdf_author": pdf_metadata.get("Author", ""),
-                                "pdf_subject": pdf_metadata.get("Subject", ""),
-                                "pdf_creator": pdf_metadata.get("Creator", "")
-                            }
-                        })
-                        
-                        # 進捗を定期的に表示
-                        if (i + 1) % progress_interval == 0:
-                            logger.info(f"Progress: {i+1}/{total_pages} pages processed")
-                            
-                        # 明示的にページオブジェクトを解放
-                        del page
-                        
-                    except Exception as page_error:
-                        logger.warning(f"Error extracting text from page {i+1}: {page_error}, skipping page")
-                        # エラーが発生したページは空のテキストとして追加
-                        batch_pages.append({
-                            "text": "",
-                            "metadata": {
-                                "page_number": i + 1,
-                                "page_total": total_pages,
-                                "error": str(page_error)
-                            }
-                        })
-                
-                # バッチ処理したページをメインリストに追加
-                pages.extend(batch_pages)
-                
-                # バッチごとにGCを実行してメモリを解放
-                import gc
-                gc.collect()
-                
-            logger.info(f"Successfully extracted text from {len(pages)} pages")
-            return pages
-            
-    except MemoryError as me:
-        logger.error(f"Memory error extracting text from PDF {file_path}: {me}")
-        # 部分的に抽出できたページだけでも返す
-        if pages:
-            logger.info(f"Returning {len(pages)} pages that were successfully extracted before memory error")
-            return pages
-        return []
-        
-    except Exception as e:
-        logger.error(f"Error extracting text from PDF {file_path}: {e}")
-        # スタックトレースを出力
-        import traceback
-        logger.error(traceback.format_exc())
-        return []
+@dataclass
+class TableMetrics:
+    """テーブルの品質メトリクス"""
+    column_count: int
+    row_count: int
+    data_density: float  # 空でないセルの割合
+    alignment_score: float  # 列の位置揃えスコア
+    structure_confidence: float  # 構造的な信頼度
+    content_quality: float  # コンテンツの品質スコア
+    japanese_ratio: float = 0.0  # 日本語文字の割合
+    layout_score: float = 0.0  # レイアウトの品質スコア
 
-def process_pdf_file(file_path: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[Dict[str, Any]]:
-    """
-    PDFファイルを処理して、チャンクとメタデータを抽出する
+@dataclass
+class TableStructure:
+    """テーブルの構造情報"""
+    columns: int
+    header_row: int
+    rows: int
+    alignments: List[str]
+    content_types: List[str]
+    metrics: TableMetrics
+    title: str = ""
+    features: Dict[str, Any] = field(default_factory=dict)
+
+class PDFTableAnalyzer:
+    """PDFのテーブル解析を行うクラス"""
     
-    Args:
-        file_path: 処理するPDFファイルのパス
-        chunk_size: 分割するチャンクのサイズ
-        chunk_overlap: チャンク間のオーバーラップ文字数
-        
-    Returns:
-        分割されたテキストとメタデータを含む辞書のリスト
-    """
-    # ファイルサイズをチェックし、大きいPDFの場合はチャンクサイズを自動調整
-    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    if file_size_mb > 30:  # 30MB以上のPDF
-        orig_chunk_size = chunk_size
-        # ファイルサイズに応じてチャンクサイズを調整
-        if file_size_mb > 100:
-            chunk_size = min(chunk_size, 200)  # 100MB以上の場合は最大200文字
-        elif file_size_mb > 50:
-            chunk_size = min(chunk_size, 300)  # 50-100MBの場合は最大300文字
-        else:
-            chunk_size = min(chunk_size, 400)  # 30-50MBの場合は最大400文字
-        
-        if chunk_size != orig_chunk_size:
-            logger.info(f"Large PDF detected ({file_size_mb:.1f} MB), adjusted chunk size from {orig_chunk_size} to {chunk_size}")
+    # 文字種の定義
+    CHAR_TYPES = {
+        'kanji': (0x4E00, 0x9FFF),      # CJK統合漢字
+        'hiragana': (0x3040, 0x309F),    # ひらがな
+        'katakana': (0x30A0, 0x30FF),    # カタカナ
+        'full_width': (0xFF00, 0xFFEF),  # 全角英数字
+    }
     
-    # より小さいオーバーラップを使用して更にメモリ使用量を削減
-    chunk_overlap = min(chunk_overlap, chunk_size // 10)
-    logger.info(f"Processing PDF file: {file_path}")
+    # テーブル検出パターン
+    TABLE_PATTERNS = {
+        'headers': [
+            # 日本語のヘッダーパターン
+            r'^(番号|No\.|ID|＃)\s*[:：]?\s*',
+            r'^(項目|内容|説明|概要|名称|タイトル)\s*[:：]?\s*',
+            r'^(種類|タイプ|型|カテゴリ)\s*[:：]?\s*',
+            r'^(値|データ|結果|状態)\s*[:：]?\s*',
+            r'^(日時|日付|期間)\s*[:：]?\s*',
+            # 英語のヘッダーパターン
+            r'^(Number|No\.|ID|#)\s*:?\s*',
+            r'^(Item|Name|Title|Description)\s*:?\s*',
+            r'^(Type|Category|Class)\s*:?\s*',
+            r'^(Value|Data|Result|Status)\s*:?\s*',
+            r'^(Date|Time|Period)\s*:?\s*'
+        ],
+        'markers': [
+            # 日本語のテーブルマーカー
+            '表', 'テーブル', '一覧', '比較', '対照',
+            '項目', 'リスト', '仕様', '設定', 'パラメータ',
+            'オプション', '属性', '定義', '概要', '分類',
+            # 英語のテーブルマーカー
+            'Table', 'List', 'Comparison', 'Parameters',
+            'Options', 'Properties', 'Attributes', 'Settings'
+        ],
+        'separators': ['|', '┃', '｜', '│', '┆', '┊', '：', ':'],
+        'borders': ['-', '=', '─', '━', '—', '_', '＿', '―']
+    }
     
-    try:
-        # PDFからテキストとメタデータを抽出
-        pdf_pages = extract_text_from_pdf(file_path)
-        
-        if not pdf_pages:
-            logger.warning(f"No text extracted from {file_path}")
-            return []
-            
-        # ファイル名とパス情報を取得
-        file_name = os.path.basename(file_path)
-        relative_path = os.path.relpath(file_path, start=config.BASE_DIR)
-        
-        # テキスト分割器を初期化
-        splitter = BaseTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        
-        all_chunks = []
-        
-        # 各ページを処理
-        for page in pdf_pages:
-            page_text = page["text"]
-            page_metadata = page["metadata"]
-            
-            # 基本メタデータを作成
-            metadata = {
-                "source": file_path,
-                "relative_path": relative_path,
-                "file_name": file_name,
-                "source_type": "pdf",
-                "file_extension": ".pdf",
-                "page_number": page_metadata["page_number"],
-                "page_total": page_metadata["page_total"]
+    def _get_char_type(self, char: str) -> str:
+        """文字の種類を判定"""
+        code = ord(char)
+        for type_name, (start, end) in self.CHAR_TYPES.items():
+            if start <= code <= end:
+                return type_name
+        return 'other'
+
+    def _analyze_text_properties(self, text: str) -> Dict[str, float]:
+        """テキストの特徴を分析"""
+        if not text:
+            return {
+                'japanese_ratio': 0.0,
+                'space_ratio': 0.0,
+                'symbol_ratio': 0.0,
+                'alpha_ratio': 0.0,
+                'digit_ratio': 0.0
             }
             
-            # PDFのメタデータを追加
-            for key in ["pdf_title", "pdf_author", "pdf_subject", "pdf_creator"]:
-                if page_metadata.get(key):
-                    metadata[key] = page_metadata[key]
+        char_counts = defaultdict(int)
+        total_chars = len(text)
+        
+        for char in text:
+            if char.isspace():
+                char_counts['space'] += 1
+            elif char.isalpha():
+                char_counts['alpha'] += 1
+            elif char.isdigit():
+                char_counts['digit'] += 1
+            elif unicodedata.category(char).startswith('P'):
+                char_counts['symbol'] += 1
+            else:
+                char_type = self._get_char_type(char)
+                char_counts[char_type] += 1
+        
+        japanese_chars = sum(char_counts[t] for t in ['kanji', 'hiragana', 'katakana', 'full_width'])
+        
+        return {
+            'japanese_ratio': japanese_chars / total_chars,
+            'space_ratio': char_counts['space'] / total_chars,
+            'symbol_ratio': char_counts['symbol'] / total_chars,
+            'alpha_ratio': char_counts['alpha'] / total_chars,
+            'digit_ratio': char_counts['digit'] / total_chars
+        }
+
+    def _detect_table_boundary(self, lines: List[str], start_idx: int) -> Optional[Tuple[int, int]]:
+        """テーブルの開始位置と終了位置を検出"""
+        if start_idx >= len(lines):
+            return None
             
-            # テキストを分割し、メタデータを付与
-            page_chunks = splitter.split_with_metadata(page_text, metadata)
-            all_chunks.extend(page_chunks)
-        
-        logger.info(f"Successfully processed {file_path} into {len(all_chunks)} chunks")
-        return all_chunks
-        
-    except Exception as e:
-        logger.error(f"Error processing PDF file {file_path}: {e}")
-        return []
-        
-def process_pdf_directory(directory: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[Dict[str, Any]]:
-    """
-    ディレクトリ内のすべてのPDFファイルを処理する
-    
-    Args:
-        directory: 処理するディレクトリのパス
-        chunk_size: 分割するチャンクのサイズ
-        chunk_overlap: チャンク間のオーバーラップ文字数
-        
-    Returns:
-        すべてのファイルの分割されたテキストとメタデータを含む辞書のリスト
-    """
-    logger.info(f"Processing PDF files in directory: {directory}")
-    
-    all_chunks = []
-    
-    # ディレクトリがなければエラー
-    if not os.path.exists(directory):
-        logger.error(f"Directory does not exist: {directory}")
-        return all_chunks
-        
-    # 再帰的にすべてのPDFファイルを処理
-    for root, _, files in os.walk(directory):
-        for file in files:
-            if file.lower().endswith('.pdf'):
-                file_path = os.path.join(root, file)
-                chunks = process_pdf_file(file_path, chunk_size, chunk_overlap)
-                all_chunks.extend(chunks)
+        # テーブルの特徴を評価するスコア関数
+        def score_line(line: str) -> float:
+            if not line.strip():
+                return 0.0
                 
-    logger.info(f"Processed {len(all_chunks)} total chunks from directory: {directory}")
-    return all_chunks
+            score = 0.0
+            # 区切り文字の存在
+            for sep in self.TABLE_PATTERNS['separators']:
+                if sep in line:
+                    score += 0.3
+                    break
+            
+            # 整形された空白
+            if re.search(r'\s{2,}', line):
+                score += 0.2
+            
+            # 列のアライメント
+            cells = self._split_line(line)
+            if len(cells) >= 2:
+                score += 0.2
+            
+            # 数値の存在
+            if re.search(r'\d+', line):
+                score += 0.1
+            
+            return score
+        
+        # テーブルの開始を探索
+        scores = [score_line(line) for line in lines[start_idx:]]
+        if not scores:
+            return None
+            
+        # スコアの移動平均を計算
+        window_size = 3
+        avg_scores = []
+        for i in range(len(scores) - window_size + 1):
+            avg_scores.append(sum(scores[i:i+window_size]) / window_size)
+        
+        # テーブルの境界を決定
+        threshold = 0.3
+        table_start = None
+        table_end = None
+        
+        for i, score in enumerate(avg_scores):
+            if score > threshold:
+                if table_start is None:
+                    table_start = start_idx + i
+            elif table_start is not None and table_end is None:
+                table_end = start_idx + i
+                break
+        
+        if table_start is not None:
+            table_end = table_end or (start_idx + len(scores))
+            return table_start, table_end
+            
+        return None
+
+    def _normalize_table_content(self, cells: List[List[str]]) -> List[List[str]]:
+        """テーブルの内容を正規化"""
+        if not cells:
+            return []
+            
+        # 空のセルを標準化
+        normalized = [[cell.strip() if cell else '' for cell in row] for row in cells]
+        
+        # 列数を統一
+        max_cols = max(len(row) for row in normalized)
+        normalized = [row + [''] * (max_cols - len(row)) for row in normalized]
+        
+        # セルの内容をクリーニング
+        cleaned = []
+        for row in normalized:
+            cleaned_row = []
+            for cell in row:
+                # 改行を空白に置換
+                cell = cell.replace('\n', ' ')
+                # 連続する空白を1つに
+                cell = ' '.join(cell.split())
+                # 全角数字を半角に
+                cell = unicodedata.normalize('NFKC', cell)
+                cleaned_row.append(cell)
+            cleaned.append(cleaned_row)
+        
+        return cleaned
+
+    def process_table(self, lines: List[str]) -> Tuple[Optional[TableStructure], Optional[str]]:
+        """テーブルを処理してMarkdown形式に変換"""
+        if not lines:
+            return None, ""
+            
+        # テーブル構造の検出
+        boundary = self._detect_table_boundary(lines, 0)
+        if not boundary:
+            return None, ""
+            
+        start_idx, end_idx = boundary
+        table_lines = lines[start_idx:end_idx]
+        
+        # テーブルのパース
+        cells = [self._split_line(line) for line in table_lines]
+        cells = [row for row in cells if row]  # 空行を除去
+        
+        if len(cells) < 2:  # ヘッダー + 最低1行のデータ
+            return None, ""
+        
+        # テーブルの内容を正規化
+        normalized = self._normalize_table_content(cells)
+        if not normalized:
+            return None, ""
+        
+        # 列の解析
+        col_count = len(normalized[0])
+        alignments = []
+        content_types = []
+        
+        for col in range(col_count):
+            col_data = [row[col] for row in normalized]
+            alignments.append(self._detect_alignment(col_data))
+            content_types.append(self._detect_content_type(col_data))
+        
+        # テーブルメトリクスの計算
+        metrics = self._calculate_table_metrics(normalized)
+        
+        # 構造情報の作成
+        structure = TableStructure(
+            columns=col_count,
+            header_row=0,  # デフォルトは最初の行をヘッダーとする
+            rows=len(normalized),
+            alignments=alignments,
+            content_types=content_types,
+            metrics=metrics,
+            title=self._find_table_title(lines[:start_idx])
+        )
+        
+        # Markdown形式に変換
+        markdown = self._format_as_markdown(structure, normalized)
+        
+        return structure, markdown
+
+    def _format_as_markdown(self, structure: TableStructure, data: List[List[str]]) -> str:
+        """テーブルをMarkdown形式に変換"""
+        if not data:
+            return ""
+        
+        lines = []
+        
+        # タイトル
+        if structure.title:
+            lines.append(f"\n**{structure.title}**\n")
+        
+        # 列幅の計算（日本語文字を考慮）
+        col_widths = []
+        for col in range(structure.columns):
+            width = max(
+                sum(2 if ord(c) > 127 else 1 for c in str(row[col]))
+                for row in data
+            )
+            col_widths.append(max(3, min(width, 30)))  # 最小3文字、最大30文字
+        
+        # ヘッダー行
+        header = "| "
+        header += " | ".join(
+            str(cell).ljust(width) for cell, width in zip(data[0], col_widths)
+        )
+        header += " |"
+        lines.append(header)
+        
+        # 区切り行
+        separator = "| "
+        for i, (width, align) in enumerate(zip(col_widths, structure.alignments)):
+            if align == 'right':
+                separator += "-" * (width-1) + ":" + " | "
+            else:
+                separator += "-" * width + " | "
+        lines.append(separator.rstrip())
+        
+        # データ行
+        for row in data[1:]:
+            row_str = "| "
+            row_str += " | ".join(
+                str(cell).ljust(width) for cell, width in zip(row, col_widths)
+            )
+            row_str += " |"
+            lines.append(row_str)
+        
+        return "\n".join(lines)
+
+    def _detect_alignment(self, values: List[str]) -> str:
+        """列の位置揃えを検出"""
+        if not values:
+            return 'left'
+            
+        # 数値の割合を計算
+        numeric_count = sum(
+            1 for v in values 
+            if re.match(r'^[-+]?\d*\.?\d+$', v) or
+               re.match(r'^\d{4}[-/年]\d{1,2}[-/月]\d{1,2}', v)
+        )
+        
+        return 'right' if numeric_count / len(values) > 0.5 else 'left'
+
+    def _detect_content_type(self, values: List[str]) -> str:
+        """列のコンテンツタイプを検出"""
+        if not values:
+            return 'text'
+            
+        type_scores = defaultdict(int)
+        
+        for value in values:
+            if not value.strip():
+                continue
+                
+            # 数値
+            if re.match(r'^[-+]?\d*\.?\d+$', value):
+                type_scores['numeric'] += 1
+            # 日付
+            elif re.match(r'^\d{4}[-/年]\d{1,2}[-/月]\d{1,2}', value):
+                type_scores['date'] += 1
+            # 日本語
+            elif any(ord(c) > 0x3040 for c in value):
+                type_scores['japanese'] += 1
+            # コード
+            elif re.match(r'^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$', value):
+                type_scores['code'] += 1
+            else:
+                type_scores['text'] += 1
+        
+        if not type_scores:
+            return 'text'
+            
+        return max(type_scores.items(), key=lambda x: x[1])[0]
+
+    def _calculate_table_metrics(self, data: List[List[str]]) -> TableMetrics:
+        """テーブルの品質メトリクスを計算"""
+        if not data:
+            return TableMetrics(
+                column_count=0,
+                row_count=0,
+                data_density=0.0,
+                alignment_score=0.0,
+                structure_confidence=0.0,
+                content_quality=0.0
+            )
+        
+        # データの密度
+        total_cells = len(data) * len(data[0])
+        non_empty_cells = sum(1 for row in data for cell in row if cell.strip())
+        data_density = non_empty_cells / total_cells
+        
+        # 日本語の割合
+        jp_chars = sum(
+            1 for row in data for cell in row 
+            for c in cell if 0x3040 <= ord(c) <= 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF
+        )
+        total_chars = sum(len(cell) for row in data for cell in row)
+        japanese_ratio = jp_chars / total_chars if total_chars > 0 else 0.0
+        
+        # レイアウトスコア
+        layout_scores = []
+        for i in range(len(data[0])):
+            col_data = [row[i] for row in data]
+            # 列の整列性
+            alignment = self._detect_alignment(col_data)
+            aligned_count = sum(1 for v in col_data if self._check_alignment(v, alignment))
+            layout_scores.append(aligned_count / len(col_data))
+        
+        layout_score = sum(layout_scores) / len(layout_scores) if layout_scores else 0.0
+        
+        # 構造的な信頼度
+        structure_confidence = self._calculate_structure_confidence(data)
+        
+        # コンテンツ品質
+        content_quality = self._calculate_content_quality(data)
+        
+        return TableMetrics(
+            column_count=len(data[0]),
+            row_count=len(data),
+            data_density=data_density,
+            alignment_score=layout_score,
+            structure_confidence=structure_confidence,
+            content_quality=content_quality,
+            japanese_ratio=japanese_ratio,
+            layout_score=layout_score
+        )
+
+    def _calculate_structure_confidence(self, data: List[List[str]]) -> float:
+        """テーブル構造の信頼度を計算"""
+        if not data:
+            return 0.0
+        
+        scores = []
+        
+        # ヘッダーの品質
+        header = data[0]
+        header_score = sum(1 for cell in header if cell.strip()) / len(header)
+        scores.append(header_score)
+        
+        # データ行の一貫性
+        for row in data[1:]:
+            # 空でないセルの割合
+            non_empty = sum(1 for cell in row if cell.strip())
+            row_score = non_empty / len(row)
+            scores.append(row_score)
+        
+        # 列の一貫性
+        for col in range(len(data[0])):
+            col_data = [row[col] for row in data]
+            col_type = self._detect_content_type(col_data)
+            type_matches = sum(
+                1 for v in col_data 
+                if self._check_content_type(v, col_type)
+            )
+            col_score = type_matches / len(col_data)
+            scores.append(col_score)
+        
+        return sum(scores) / len(scores) if scores else 0.0
+
+    def _check_content_type(self, value: str, expected_type: str) -> bool:
+        """値が期待されるコンテンツタイプに一致するか確認"""
+        if not value.strip():
+            return True
+            
+        if expected_type == 'numeric':
+            return bool(re.match(r'^[-+]?\d*\.?\d+$', value))
+        elif expected_type == 'date':
+            return bool(re.match(r'^\d{4}[-/年]\d{1,2}[-/月]\d{1,2}', value))
+        elif expected_type == 'japanese':
+            return any(0x3040 <= ord(c) <= 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF for c in value)
+        elif expected_type == 'code':
+            return bool(re.match(r'^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$', value))
+            
+        return True
+
+    def _calculate_content_quality(self, data: List[List[str]]) -> float:
+        """テーブルコンテンツの品質スコアを計算"""
+        if not data:
+            return 0.0
+        
+        scores = []
+        
+        for row in data:
+            for cell in row:
+                if not cell.strip():
+                    continue
+                
+                # セルの品質を評価
+                cell_score = 1.0
+                
+                # 長すぎる値にペナルティ
+                if len(cell) > 100:
+                    cell_score *= 0.7
+                # 短すぎる値にペナルティ
+                elif len(cell) < 2:
+                    cell_score *= 0.8
+                
+                # 異常な文字の存在をチェック
+                if re.search(r'[^\w\s\-_.,;:()[\]{}！？、。（）［］｛｝]', cell):
+                    cell_score *= 0.9
+                
+                # 日本語文字の適切な使用
+                jp_ratio = sum(1 for c in cell if 0x3040 <= ord(c) <= 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF) / len(cell)
+                if 0 < jp_ratio < 1:  # 日本語と英数字が混在
+                    cell_score *= 0.95
+                
+                scores.append(cell_score)
+        
+        return sum(scores) / len(scores) if scores else 0.0
+
+    def _split_line(self, line: str) -> List[str]:
+        """行をセルに分割"""
+        line = line.strip()
+        if not line:
+            return []
+        
+        # 区切り文字による分割
+        for sep in self.TABLE_PATTERNS['separators']:
+            if sep in line:
+                return [cell.strip() for cell in line.split(sep) if cell.strip()]
+        
+        # 空白文字による分割
+        parts = re.split(r'\s{2,}', line)
+        return [part.strip() for part in parts if part.strip()]
+
+    def _check_alignment(self, value: str, expected_align: str) -> bool:
+        """値の位置揃えが期待通りかチェック"""
+        value = value.strip()
+        if not value:
+            return True
+        
+        if expected_align == 'right':
+            return bool(re.match(r'^[-+]?\d*\.?\d+$', value) or
+                       re.match(r'^\d{4}[-/年]\d{1,2}[-/月]\d{1,2}', value))
+        
+        return True
+
+    def _find_table_title(self, context_lines: List[str], max_lines: int = 3) -> str:
+        """テーブルのタイトルを探す"""
+        if not context_lines:
+            return ""
+        
+        # 最後のmax_lines行を逆順に検索
+        for line in reversed(context_lines[-max_lines:]):
+            line = line.strip()
+            if not line:
+                continue
+            
+            # マーカーを含む行を探す
+            for marker in self.TABLE_PATTERNS['markers']:
+                if marker in line:
+                    return line
+        
+        return ""
