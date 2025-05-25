@@ -535,3 +535,115 @@ class PDFTableAnalyzer:
                     return line
         
         return ""
+
+class PDFProcessor:
+    """
+    Processes PDF files to extract text and metadata.
+    """
+
+    def __init__(self):
+        """
+        Initializes the PDFProcessor.
+        """
+        # Logger setup can be done here if specific configuration is needed
+        pass
+
+    def process_file(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Extracts text and metadata from each page of a PDF file.
+
+        Args:
+            file_path: The path to the PDF file.
+
+        Returns:
+            A list of dictionaries, where each dictionary represents a page
+            and contains the extracted text and metadata (source and page number).
+            Returns an empty list if the file cannot be processed or is empty.
+        """
+        processed_chunks = []
+        
+        if not os.path.exists(file_path):
+            logger.error(f"File not found: {file_path}")
+            return processed_chunks
+
+        try:
+            # Open the PDF file using pdfplumber
+            with pdfplumber.open(file_path) as pdf:
+                if not pdf.pages:
+                    logger.warning(f"No pages found in PDF: {file_path}")
+                    return processed_chunks
+                
+                # Iterate through each page in the PDF
+                for i, page in enumerate(pdf.pages):
+                    page_number = i + 1  # Page numbers are 1-indexed
+                    
+                    # Extract text from the page
+                    text = page.extract_text()
+                    
+                    if text and text.strip():
+                        # Construct the metadata dictionary
+                        metadata = {
+                            'source': file_path,
+                            'page_number': page_number
+                        }
+                        
+                        # Append the processed chunk to the list
+                        processed_chunks.append({
+                            'text': text.strip(),
+                            'metadata': metadata
+                        })
+                    else:
+                        logger.info(f"No text extracted from page {page_number} of {file_path}")
+
+        except pdfplumber.exceptions.PDFSyntaxError as e:
+            logger.error(f"PDFSyntaxError processing file {file_path}: {e}")
+        except Exception as e:
+            # Catch any other exceptions during PDF processing
+            logger.error(f"Error processing PDF file {file_path}: {e}")
+            # Depending on the desired behavior, you might want to re-raise
+            # or return partially processed data if applicable.
+            # For now, returning an empty list or whatever was processed so far.
+
+        return processed_chunks
+
+# Example Usage (optional, for testing purposes)
+if __name__ == '__main__':
+    import os
+    from pprint import pprint
+
+    # Configure basic logging for the example
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    # Construct path to the sample PDF relative to this script's location
+    # This script is in vectorize/processors/pdf_processor.py
+    # We want to reach sample_documents/sample.pdf at the repository root.
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.abspath(os.path.join(script_dir, '..', '..')) 
+        sample_pdf_path = os.path.join(repo_root, 'sample_documents', 'sample.pdf')
+
+        if not os.path.exists(sample_pdf_path):
+            print(f"Error: Sample PDF not found at '{sample_pdf_path}'")
+            print("Please ensure 'sample_documents/sample.pdf' exists in the repository root.")
+            print("This PDF should have been created by a previous subtask.")
+        else:
+            processor = PDFProcessor()
+            print(f"Attempting to process PDF: {sample_pdf_path}")
+            
+            extracted_chunks = processor.process_file(sample_pdf_path)
+            
+            if extracted_chunks:
+                print(f"\nSuccessfully extracted {len(extracted_chunks)} chunk(s) from '{sample_pdf_path}':")
+                for i, chunk_data in enumerate(extracted_chunks):
+                    print(f"\n--- Chunk {i+1} ---")
+                    pprint(chunk_data)
+            else:
+                print(f"No data extracted from '{sample_pdf_path}'. "
+                      "The PDF might be empty, contain only images, or there might have been an issue.")
+
+    except Exception as e:
+        print(f"An error occurred during the PDF processing example: {e}")
+        import traceback
+        traceback.print_exc()
+
+# Ensure pdfplumber is installed: pip install pdfplumber

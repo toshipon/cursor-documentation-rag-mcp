@@ -328,10 +328,11 @@ async def query(
         # レスポンスを整形
         results = []
         for result in search_results:
+            # Ensure mapping aligns with VectorStore output: result["text"] to QueryResult.content
             results.append(QueryResult(
-                content=result["content"],
-                metadata=result["metadata"],
-                score=float(result["score"]) if "score" in result else 0.0
+                content=result.get("text", result.get("content", "")), # Prioritize "text", fallback to "content" if old format
+                metadata=result.get("metadata", {}),
+                score=float(result.get("score", 0.0)) 
             ))
         
         # 処理時間を計算（ミリ秒単位）

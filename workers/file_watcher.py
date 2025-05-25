@@ -17,15 +17,16 @@ import config
 logging.basicConfig(level=getattr(logging, config.LOG_LEVEL))
 logger = logging.getLogger(__name__)
 
-# ベクトル化対象のファイル拡張子
-SUPPORTED_EXTENSIONS = {
-    '.md', '.markdown',  # マークダウン
-    '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.c', '.cpp', '.cs', '.go', '.rb', '.php', '.swift', '.kt', '.rs',  # コード
-    '.pdf'  # PDF
+# Default supported extensions if not provided by config or constructor
+DEFAULT_SUPPORTED_EXTENSIONS = {
+    '.md', '.markdown', '.txt', '.log', '.pdf', '.json', '.yaml', '.yml',
+    '.py', '.js', '.ts', '.java', '.c', '.cpp', '.h', '.hpp', '.cs', '.go',
+    '.php', '.rb', '.swift', '.kt', '.scala', '.rs', '.lua', '.pl', '.sh',
+    '.html', '.htm', '.css', '.scss', '.less', '.xml', '.toml', '.ini', '.cfg', '.conf'
 }
 
-class VectorizationEvent:
-    """ベクトル化イベントを表すクラス"""
+class _InternalChangeEvent:
+    """内部処理用のファイル変更イベントを表すクラス (デバウンス処理用)"""
     
     def __init__(self, file_path: str, event_type: str, timestamp: float = None):
         """
@@ -33,78 +34,101 @@ class VectorizationEvent:
         
         Args:
             file_path: ファイルパス
-            event_type: イベントタイプ ('created', 'modified', 'deleted')
+            event_type: イベントタイプ ('modified', 'deleted')
             timestamp: イベント発生時刻（Unix時間）
         """
         self.file_path = file_path
-        self.event_type = event_type
+        self.event_type = event_type # 'modified' (for create/update) or 'deleted'
         self.timestamp = timestamp or time.time()
     
     def __str__(self) -> str:
-        return f"VectorizationEvent({self.event_type}, {self.file_path}, {self.timestamp})"
+        return f"_InternalChangeEvent({self.event_type}, {self.file_path}, {self.timestamp})"
     
     def __eq__(self, other) -> bool:
-        if not isinstance(other, VectorizationEvent):
+        if not isinstance(other, _InternalChangeEvent):
             return False
         return self.file_path == other.file_path and self.event_type == other.event_type
     
     def __hash__(self) -> int:
         return hash((self.file_path, self.event_type))
 
-class FileChangeHandler(FileSystemEventHandler):
+class DocumentEventHandler(FileSystemEventHandler):
     """ファイルシステムのイベントを処理するハンドラー"""
     
-    def __init__(self, event_queue: queue.Queue, ignored_patterns: List[str] = None, 
+    def __init__(self, event_queue: queue.Queue, ignored_patterns: List[str] = None,
+                 supported_extensions: Optional[Set[str]] = None,
                  debounce_seconds: float = 2.0):
         """
         初期化
         
         Args:
-            event_queue: ベクトル化イベントを格納するキュー
+            event_queue: イベント辞書を格納するキュー
             ignored_patterns: 無視するファイルパターンのリスト
+            supported_extensions: サポートするファイル拡張子のセット。Noneの場合、configから読み込む。
             debounce_seconds: イベントのデバウンス時間（秒）
         """
         self.event_queue = event_queue
         self.ignored_patterns = ignored_patterns or []
         self.debounce_seconds = debounce_seconds
+        
+        if supported_extensions is not None:
+            self.supported_extensions = set(supported_extensions)
+        else:
+            cfg_extensions = getattr(config, 'SUPPORTED_EXTENSIONS', None)
+            if cfg_extensions is not None:
+                self.supported_extensions = set(cfg_extensions)
+                logger.info("Using SUPPORTED_EXTENSIONS from config.py")
+            else:
+                self.supported_extensions = DEFAULT_SUPPORTED_EXTENSIONS
+                logger.info("Using DEFAULT_SUPPORTED_EXTENSIONS from file_watcher.py")
+        
+        logger.debug(f"DocumentEventHandler initialized with extensions: {self.supported_extensions}")
+
         self.last_events: Dict[str, float] = {}  # ファイルパスごとの最終イベント時刻
-        self.pending_events: Set[VectorizationEvent] = set()  # 保留中のイベント
+        self.pending_events: Set[_InternalChangeEvent] = set()  # 保留中の内部イベント
         
         # デバウンスタイマー
         self.timer = None
         self.timer_lock = threading.Lock()
     
-    def _should_ignore(self, file_path: str) -> bool:
+    def _is_target_file(self, file_path: str) -> bool:
         """
-        ファイルを無視すべきかどうかを判定
+        ファイルが処理対象かどうかを判定 (旧 _should_ignore のロジックを反転・変更)
         
         Args:
             file_path: ファイルパス
             
         Returns:
-            無視すべきならTrue、そうでなければFalse
+            処理対象ならTrue、そうでなければFalse
         """
-        # 隠しファイルを無視
+        # 隠しファイルは無視
         if os.path.basename(file_path).startswith('.'):
-            return True
+            logger.debug(f"Ignoring hidden file: {file_path}")
+            return False
         
-        # 特定のディレクトリを無視
-        ignored_dirs = ['__pycache__', '.git', 'venv', 'env', '.venv', '.env']
-        for ignored_dir in ignored_dirs:
-            if f'/{ignored_dir}/' in file_path or file_path.endswith(f'/{ignored_dir}'):
-                return True
+        # 特定の無視ディレクトリをチェック
+        # configから読み込むように変更することも検討 (例: config.IGNORED_DIRECTORIES)
+        ignored_dirs = getattr(config, 'WATCHER_IGNORED_DIRECTORIES', ['__pycache__', '.git', 'venv', 'env', '.venv', '.env', 'node_modules'])
+        for ignored_dir_name in ignored_dirs:
+            # パスセパレータを考慮してチェック
+            if os.path.sep + ignored_dir_name + os.path.sep in file_path or \
+               file_path.endswith(os.path.sep + ignored_dir_name):
+                logger.debug(f"Ignoring file in ignored directory '{ignored_dir_name}': {file_path}")
+                return False
         
         # 無視パターンをチェック
         for pattern in self.ignored_patterns:
-            if pattern in file_path:
-                return True
+            if pattern in file_path: # シンプルな部分文字列一致。正規表現も検討可。
+                logger.debug(f"Ignoring file due to pattern '{pattern}': {file_path}")
+                return False
         
         # 拡張子をチェック
         ext = os.path.splitext(file_path)[1].lower()
-        if ext not in SUPPORTED_EXTENSIONS:
-            return True
+        if ext not in self.supported_extensions:
+            logger.debug(f"Ignoring file with unsupported extension '{ext}': {file_path}")
+            return False
             
-        return False
+        return True # すべてのチェックをパスした場合、処理対象
     
     def _process_event(self, event: FileSystemEvent) -> None:
         """
@@ -116,44 +140,63 @@ class FileChangeHandler(FileSystemEventHandler):
         # ディレクトリの場合は無視
         if event.is_directory:
             return
-            
-        file_path = event.src_path
-        
-        # 無視すべきファイルは処理しない
-        if self._should_ignore(file_path):
-            return
-            
-        # イベントタイプを変換
+
+        action: Optional[str] = None
+        file_path: Optional[str] = None
+
         if event.event_type == 'created' or event.event_type == 'modified':
-            event_type = 'modified'  # 作成と変更は同じように処理
+            action = 'update' # 'create' or 'update' as per new requirement
+            file_path = event.src_path
+            if not self._is_target_file(file_path):
+                return
         elif event.event_type == 'deleted':
-            event_type = 'deleted'
+            action = 'delete'
+            file_path = event.src_path
+            # For deleted files, we might still want to process them if they were previously target files.
+            # The _is_target_file check might be less relevant here, or based on prior state.
+            # However, for simplicity, we check its extension. If it's a hidden file, etc., it might be ignored.
+            # This logic depends on whether we want to clean up non-target files from vector store.
+            # For now, we'll apply similar filtering.
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext not in self.supported_extensions:
+                 # If it's not a supported extension, we might not care about its deletion for vectorization.
+                 # However, if it was moved from a supported name to an unsupported one, this could be an issue.
+                 # The 'moved' event handler below is better for this.
+                logger.debug(f"Ignoring deletion of non-target or filtered file: {file_path}")
+                return
         elif event.event_type == 'moved':
-            # 移動元と移動先を別々に処理
-            if hasattr(event, 'dest_path'):
-                # 移動元のファイルを削除として処理
-                self._add_event(VectorizationEvent(file_path, 'deleted'))
-                
-                # 移動先のファイルを作成として処理
-                dest_path = event.dest_path
-                if not self._should_ignore(dest_path):
-                    self._add_event(VectorizationEvent(dest_path, 'modified'))
-            return
+            src_path = event.src_path
+            dest_path = event.dest_path
+
+            # Treat as deletion of source if it was a target file
+            # Check if src_path itself would be a target (ignoring its current existence)
+            src_ext = os.path.splitext(src_path)[1].lower()
+            if src_ext in self.supported_extensions: # Basic check for relevant deletion
+                self._add_internal_event(_InternalChangeEvent(src_path, 'deleted'))
+
+            # Treat as creation/modification of destination if it is a target file
+            if self._is_target_file(dest_path):
+                self._add_internal_event(_InternalChangeEvent(dest_path, 'modified'))
+            return # Handled by _add_internal_event
         else:
-            return  # その他のイベントは無視
-            
-        # イベントをキューに追加
-        vectorization_event = VectorizationEvent(file_path, event_type)
-        self._add_event(vectorization_event)
-    
-    def _add_event(self, event: VectorizationEvent) -> None:
+            logger.debug(f"Ignoring event type: {event.event_type} for path: {event.src_path}")
+            return
+
+        if action and file_path:
+            internal_event = _InternalChangeEvent(file_path, 'modified' if action == 'update' else 'deleted')
+            self._add_internal_event(internal_event)
+
+    def _add_internal_event(self, event: _InternalChangeEvent) -> None:
         """
-        イベントを保留リストに追加し、デバウンスタイマーを設定
+        内部イベントを保留リストに追加し、デバウンスタイマーを設定
         
         Args:
-            event: ベクトル化イベント
+            event: 内部ファイル変更イベント
         """
         # 同じファイルの既存のイベントを削除して新しいイベントに置き換え
+        # If a 'delete' comes after 'modified' for the same file, 'delete' should prevail.
+        # If 'modified' comes after 'delete' (e.g. quick recreate), 'modified' should prevail.
+        # Current logic: last event wins.
         self.pending_events = {e for e in self.pending_events if e.file_path != event.file_path}
         self.pending_events.add(event)
         
@@ -164,49 +207,92 @@ class FileChangeHandler(FileSystemEventHandler):
         with self.timer_lock:
             if self.timer:
                 self.timer.cancel()
-            self.timer = threading.Timer(self.debounce_seconds, self._flush_events)
+            self.timer = threading.Timer(self.debounce_seconds, self._flush_pending_events)
             self.timer.daemon = True
             self.timer.start()
     
-    def _flush_events(self) -> None:
-        """デバウンス期間が終了したら、保留中のすべてのイベントをキューに追加"""
+    def _flush_pending_events(self) -> None:
+        """デバウンス期間が終了したら、保留中のすべてのイベントをキューに追加（辞書形式で）"""
         current_time = time.time()
-        events_to_process = []
+        events_to_queue = []
         
+        processed_paths_in_batch = set()
+
         # デバウンス期間が終了したイベントを見つける
-        for event in list(self.pending_events):
-            last_event_time = self.last_events.get(event.file_path, 0)
-            if current_time - last_event_time >= self.debounce_seconds:
-                events_to_process.append(event)
-                self.pending_events.remove(event)
+        for internal_event in list(self.pending_events): # Iterate over a copy
+            last_event_time = self.last_events.get(internal_event.file_path, 0)
+            # Process if debounce time has passed AND this path hasn't been processed in this flush cycle
+            if (current_time - last_event_time >= self.debounce_seconds) and \
+               (internal_event.file_path not in processed_paths_in_batch):
+                
+                action_for_queue = 'update' if internal_event.event_type == 'modified' else 'delete'
+                
+                task = {
+                    'file_path': internal_event.file_path,
+                    'action': action_for_queue
+                }
+                events_to_queue.append(task)
+                
+                # Update last_events for this path to the current flush time.
+                # This means that after this event is queued, subsequent events for the
+                # same file path will only be considered after debounce_seconds from current_time.
+                self.last_events[internal_event.file_path] = current_time
+                
+                self.pending_events.remove(internal_event)
+                processed_paths_in_batch.add(internal_event.file_path)
         
         # イベントをキューに追加
-        for event in events_to_process:
-            logger.info(f"Queueing {event}")
-            self.event_queue.put(event)
+        for task in events_to_queue:
+            logger.info(f"Queueing task: {task}")
+            self.event_queue.put(task)
         
         # まだ保留中のイベントがある場合は、タイマーを再設定
+        # (e.g. new events came in while flushing, or some events had shorter debounce time than others)
         if self.pending_events:
             with self.timer_lock:
-                self.timer = threading.Timer(self.debounce_seconds, self._flush_events)
-                self.timer.daemon = True
-                self.timer.start()
+                # Check if timer is already running or has been cancelled
+                if self.timer: # if timer was cancelled by external stop, don't restart
+                    self.timer.cancel() 
+                
+                # Find the minimum remaining time to wait for any pending event
+                min_wait_time = self.debounce_seconds
+                now = time.time()
+                if self.pending_events: # Check again, might have been cleared
+                    try:
+                        min_wait_time = min(
+                            self.debounce_seconds - (now - self.last_events.get(e.file_path, now))
+                            for e in self.pending_events
+                        )
+                        min_wait_time = max(0, min_wait_time) # Ensure non-negative
+                    except ValueError: # No pending events
+                        pass
+
+                if self.pending_events: # Final check
+                     self.timer = threading.Timer(min_wait_time, self._flush_pending_events)
+                     self.timer.daemon = True
+                     self.timer.start()
+                else:
+                    self.timer = None # All events flushed
     
     # イベントハンドラー（watchdogからのコールバック）
     def on_created(self, event: FileSystemEvent) -> None:
         """ファイル作成イベントのハンドラー"""
+        logger.debug(f"File created: {event.src_path}")
         self._process_event(event)
     
     def on_modified(self, event: FileSystemEvent) -> None:
         """ファイル変更イベントのハンドラー"""
+        logger.debug(f"File modified: {event.src_path}")
         self._process_event(event)
     
     def on_deleted(self, event: FileSystemEvent) -> None:
         """ファイル削除イベントのハンドラー"""
+        logger.debug(f"File deleted: {event.src_path}")
         self._process_event(event)
     
     def on_moved(self, event: FileSystemEvent) -> None:
         """ファイル移動イベントのハンドラー"""
+        logger.debug(f"File moved: from {event.src_path} to {event.dest_path}")
         self._process_event(event)
 
 class FileWatcher:
@@ -215,7 +301,8 @@ class FileWatcher:
     def __init__(self, 
                  watched_dirs: List[str], 
                  event_queue: queue.Queue,
-                 ignored_patterns: List[str] = None,
+                 ignored_patterns: Optional[List[str]] = None,
+                 supported_extensions: Optional[Set[str]] = None,
                  recursive: bool = True,
                  debounce_seconds: float = 2.0):
         """
@@ -223,21 +310,27 @@ class FileWatcher:
         
         Args:
             watched_dirs: 監視するディレクトリのリスト
-            event_queue: イベントを格納するキュー
-            ignored_patterns: 無視するパターンのリスト
+            event_queue: イベント辞書を格納するキュー
+            ignored_patterns: 無視するファイルパターンのリスト (例: ["temp_", ".tmp"])
+            supported_extensions: サポートするファイル拡張子のセット。Noneの場合、configから読み込む。
             recursive: サブディレクトリも再帰的に監視するかどうか
             debounce_seconds: イベントのデバウンス時間（秒）
         """
         self.watched_dirs = [os.path.abspath(d) for d in watched_dirs]
         self.event_queue = event_queue
         self.ignored_patterns = ignored_patterns or []
+        # The supported_extensions logic is now primarily in DocumentEventHandler.
+        # FileWatcher's own self.supported_extensions is mainly for record-keeping or if create_file_watcher needs it.
+        # DocumentEventHandler will handle the fallback chain for its own instance of supported_extensions.
+        self.supported_extensions_arg = supported_extensions # Keep the argument for clarity if needed by create_file_watcher
         self.recursive = recursive
         self.debounce_seconds = debounce_seconds
         
         self.observer = Observer()
-        self.handler = FileChangeHandler(
+        self.handler = DocumentEventHandler( 
             event_queue=self.event_queue,
             ignored_patterns=self.ignored_patterns,
+            supported_extensions=supported_extensions, # Pass the argument directly to the handler
             debounce_seconds=self.debounce_seconds
         )
         
@@ -266,12 +359,21 @@ class FileWatcher:
     def stop(self) -> None:
         """ファイル監視を停止"""
         if not self._is_running:
+            logger.info("File watcher is not running.")
             return
-            
+        
+        logger.info("Stopping file watcher...")
         self.observer.stop()
-        self.observer.join()
+        self.observer.join() # Wait for observer thread to finish
+        
+        # Cancel any pending debounce timer in the handler
+        with self.handler.timer_lock:
+            if self.handler.timer:
+                self.handler.timer.cancel()
+                self.handler.timer = None
+        
         self._is_running = False
-        logger.info("File watcher stopped")
+        logger.info("File watcher stopped.")
     
     def is_running(self) -> bool:
         """監視が実行中かどうかを返す"""
@@ -280,23 +382,33 @@ class FileWatcher:
 
 def create_file_watcher(watched_dirs: List[str], 
                        event_queue: queue.Queue, 
-                       ignored_patterns: List[str] = None,
-                       recursive: bool = True) -> FileWatcher:
+                       ignored_patterns: Optional[List[str]] = None,
+                       supported_extensions: Optional[Set[str]] = None,
+                       recursive: bool = True,
+                       debounce_seconds: float = 2.0) -> FileWatcher:
     """
     FileWatcherのインスタンスを作成
     
     Args:
         watched_dirs: 監視するディレクトリのリスト
-        event_queue: イベントを格納するキュー
+        event_queue: イベント辞書を格納するキュー
         ignored_patterns: 無視するパターンのリスト
+        supported_extensions: サポートするファイル拡張子のセット。Noneの場合、configから読み込む。
         recursive: サブディレクトリも再帰的に監視するかどうか
+        debounce_seconds: イベントのデバウンス時間（秒）
         
     Returns:
         FileWatcherのインスタンス
     """
+    # The supported_extensions argument is passed directly to FileWatcher,
+    # which then passes it to DocumentEventHandler.
+    # DocumentEventHandler now contains the robust fallback logic.
+    # No need for complex fallback here in create_file_watcher itself for this specific parameter.
     return FileWatcher(
         watched_dirs=watched_dirs,
         event_queue=event_queue,
         ignored_patterns=ignored_patterns,
-        recursive=recursive
+        supported_extensions=supported_extensions, # Pass through; handler will use its fallback
+        recursive=recursive,
+        debounce_seconds=debounce_seconds
     )

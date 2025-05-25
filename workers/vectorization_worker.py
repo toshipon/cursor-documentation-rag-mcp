@@ -13,36 +13,48 @@ import config
 from db.vector_store import VectorStore
 from db.qdrant_store import QdrantVectorStore
 from vectorize.embeddings import PLaMoEmbedder, DummyEmbedder
+# Import processor classes and functions
+from vectorize.processors.pdf_processor import PDFProcessor
 from vectorize.processors.markdown_processor import process_markdown_file
-from vectorize.processors.pdf_processor import process_pdf_file
-from vectorize.processors.code_processor import process_code_file
-from workers.file_watcher import VectorizationEvent
+from vectorize.processors.code_processor import process_code_file, FILE_EXTENSIONS as CODE_FILE_EXTENSIONS
+
+# from workers.file_watcher import VectorizationEvent # No longer used, using dicts
 
 # ロギング設定
 logging.basicConfig(level=getattr(logging, config.LOG_LEVEL))
 logger = logging.getLogger(__name__)
 
-# ファイル拡張子とプロセッサのマッピング
-FILE_PROCESSORS = {
-    '.md': process_markdown_file,
-    '.markdown': process_markdown_file,
-    '.pdf': process_pdf_file,
-    '.py': process_code_file,
-    '.js': process_code_file,
-    '.ts': process_code_file,
-    '.jsx': process_code_file,
-    '.tsx': process_code_file,
-    '.java': process_code_file,
-    '.c': process_code_file,
-    '.cpp': process_code_file,
-    '.cs': process_code_file,
-    '.go': process_code_file,
-    '.rb': process_code_file,
-    '.php': process_code_file,
-    '.swift': process_code_file,
-    '.kt': process_code_file,
-    '.rs': process_code_file
+# Wrapper classes for functional processors to make them conform to the class-based interface
+class FunctionalProcessorWrapper:
+    def __init__(self, process_function: callable, **kwargs):
+        self.process_function = process_function
+        self.kwargs = kwargs # To pass any default args like chunk_size if needed
+
+    def process_file(self, file_path: str) -> List[Dict[str, Any]]:
+        # Pass through kwargs to the original function if they are part of its signature
+        # This example assumes process_function takes file_path and optional config from kwargs
+        # Modify as per actual function signatures if they take more relevant config
+        try:
+            return self.process_function(file_path, **self.kwargs)
+        except Exception as e:
+            logger.error(f"Error in functional processor wrapper for {file_path} with {self.process_function.__name__}: {e}", exc_info=True)
+            return []
+
+# ファイル拡張子とプロセッサクラスのマッピング
+PROCESSOR_CLASSES = {
+    '.pdf': PDFProcessor,
+    # For markdown and code, use the wrapper for their respective functions
+    '.md': lambda: FunctionalProcessorWrapper(process_markdown_file), # Example: chunk_size=400, chunk_overlap=50
+    '.markdown': lambda: FunctionalProcessorWrapper(process_markdown_file),
 }
+
+# Dynamically add code processors using the wrapper
+# Since process_code_file determines language from file_path and FunctionalProcessorWrapper
+# doesn't need ext explicitly, the lambda can be simplified.
+# This factory will create a new wrapper instance each time it's called.
+common_code_wrapper_factory = lambda: FunctionalProcessorWrapper(process_code_file)
+for ext in CODE_FILE_EXTENSIONS.keys():
+    PROCESSOR_CLASSES[ext] = common_code_wrapper_factory
 
 class VectorizationWorker:
     """ファイル変更を検出して自動的にベクトル化するワーカー"""
@@ -125,160 +137,198 @@ class VectorizationWorker:
         # 埋め込みモデルは明示的な解放は不要
         self.embedder = None
     
-    def _get_processor(self, file_path: str) -> Optional[callable]:
+    def _get_document_processor(self, file_path: str) -> Optional[Any]:
         """
-        ファイルタイプに対応するプロセッサ関数を取得
+        Factory function to get an instance of the appropriate document processor.
         
         Args:
-            file_path: ファイルパス
+            file_path: The path to the file to be processed.
             
         Returns:
-            プロセッサ関数。対応するものがなければNone
+            An instance of a document processor (e.g., PDFProcessor) or None if no
+            suitable processor is found.
         """
         ext = os.path.splitext(file_path)[1].lower()
-        return FILE_PROCESSORS.get(ext)
-    
-    def _process_file(self, file_path: str) -> bool:
+        processor_class = PROCESSOR_CLASSES.get(ext)
+        
+        if processor_class:
+            try:
+                # If processors require config or other dependencies, pass them here.
+                # For PDFProcessor, it seems to be self-contained for now.
+                return processor_class() 
+            except Exception as e:
+                logger.error(f"Error instantiating processor {processor_class.__name__} for {file_path}: {e}")
+                return None
+        else:
+            logger.warning(f"No processor class found for extension {ext} ({file_path})")
+            return None
+
+    def _process_update_action(self, file_path: str) -> bool:
         """
-        単一ファイルを処理してベクトル化
+        Processes a file for an 'update' action (create or modify).
+        It extracts content, generates embeddings, and updates the vector store.
         
         Args:
-            file_path: ファイルパス
+            file_path: The path to the file to be processed.
             
         Returns:
-            処理が成功したかどうか
+            True if processing was successful, False otherwise.
         """
-        # ファイルが存在しなければエラー
         if not os.path.exists(file_path):
-            logger.error(f"File does not exist: {file_path}")
+            logger.error(f"File does not exist for update: {file_path}")
             return False
-        
-        # 既に処理済みでかつ更新がない場合はスキップ
-        if not self.vector_store.file_needs_update(file_path):
-            logger.info(f"Skipping file (no updates): {file_path}")
-            return True
-        
-        # プロセッサを取得
-        processor = self._get_processor(file_path)
-        if processor is None:
-            logger.warning(f"Unsupported file type: {file_path}")
+
+        # Check if file actually needs update (e.g., based on modification time or hash)
+        # This logic might be better inside VectorStore or a utility if complex.
+        # For now, we assume if it's in the queue, it needs processing.
+        # if not self.vector_store.file_needs_update(file_path): # Assuming this method exists
+        #     logger.info(f"Skipping file (no updates based on store check): {file_path}")
+        #     return True
+
+        processor = self._get_document_processor(file_path)
+        if not processor:
+            logger.warning(f"Unsupported file type for update: {file_path}")
             return False
-        
+
         try:
-            # ファイルを処理してチャンクを取得
-            logger.info(f"Processing file: {file_path}")
+            logger.info(f"Processing file for update: {file_path}")
             start_time = time.time()
-            
-            docs = processor(file_path)
-            
-            if not docs:
-                logger.warning(f"No content extracted from {file_path}")
-                return False
-            
-            logger.info(f"Extracted {len(docs)} chunks from {file_path}")
-            
-            # 既に処理済みのファイルは一旦削除
-            if self.vector_store.file_exists(file_path):
-                self.vector_store.delete_file(file_path)
-            
-            # テキストをベクトル化
-            texts = []
-            for i, doc in enumerate(docs):
-                text = doc.get("text", doc.get("content", "")).strip()
+
+            # processor.process_file is expected to return List[Dict[str, Any]]
+            # where each dict has 'text' and 'metadata' (like {'source': ..., 'page_number': ...})
+            chunks = processor.process_file(file_path)
+
+            if not chunks:
+                logger.warning(f"No content (chunks) extracted from {file_path}")
+                # It's important to delete existing entries if the file becomes empty or unreadable
+                # to avoid stale data.
+                deleted_count = self.vector_store.delete_by_source(file_path)
+                if deleted_count > 0:
+                    logger.info(f"Deleted {deleted_count} existing documents for now empty/unreadable file: {file_path}")
+                return False # Or True, depending on whether "no content" is an error or valid state
+
+            logger.info(f"Extracted {len(chunks)} chunks from {file_path}")
+
+            texts_to_embed = []
+            valid_chunks = []
+            for i, chunk_doc in enumerate(chunks):
+                text = chunk_doc.get("text", "").strip()
                 if not text:
-                    logger.warning(f"Empty text in chunk {i} from {file_path}")
+                    logger.warning(f"Empty text in chunk {i} from {file_path}, skipping this chunk.")
                     continue
-                texts.append(text)
-
-            if not texts:
-                logger.error(f"No valid text content found in any chunks from {file_path}")
+                texts_to_embed.append(text)
+                valid_chunks.append(chunk_doc)
+            
+            if not texts_to_embed:
+                logger.error(f"No valid text content found in any chunks from {file_path} after filtering.")
+                # Again, consider deleting existing entries
+                deleted_count = self.vector_store.delete_by_source(file_path)
+                if deleted_count > 0:
+                    logger.info(f"Deleted {deleted_count} existing documents for file with no valid text: {file_path}")
                 return False
 
-            # テキストの長さをログに出力
-            for i, text in enumerate(texts):
-                logger.debug(f"Chunk {i} from {file_path}: {len(text)} characters")
+            # Generate embeddings for the valid texts
+            vectors = self.embedder.embed_batch(texts_to_embed)
 
-            vectors = self.embedder.embed_batch(texts)
+            # Before adding new documents, delete existing ones for this source
+            # This handles updates correctly by replacing old content.
+            delete_count = self.vector_store.delete_by_source(file_path)
+            if delete_count > 0:
+                logger.info(f"Deleted {delete_count} existing documents for {file_path} before update.")
+
+            # Ensure each chunk's metadata includes the source (file_path)
+            for chunk in valid_chunks:
+                if "metadata" not in chunk:
+                    chunk["metadata"] = {}
+                if "source" not in chunk["metadata"]: # Only set if not already present
+                    chunk["metadata"]["source"] = file_path
             
-            # ベクトルストアに保存
-            self.vector_store.add_documents(docs, vectors, file_path=file_path)
-            
+            # Add the new documents (valid_chunks with their vectors) to the vector store
+            # The add_documents method needs to associate vectors with their respective chunks.
+            # It should handle the 'metadata' from each chunk.
+            self.vector_store.add_documents(valid_chunks, vectors)
+
             elapsed = time.time() - start_time
-            logger.info(f"Successfully processed {file_path} in {elapsed:.2f} seconds")
-            
+            logger.info(f"Successfully processed (updated) {file_path} in {elapsed:.2f} seconds. Added {len(valid_chunks)} chunks.")
             return True
-            
+
         except Exception as e:
-            logger.error(f"Error processing file {file_path}: {e}")
+            logger.error(f"Error processing file {file_path} for update: {e}", exc_info=True)
             return False
-    
-    def _process_delete(self, file_path: str) -> bool:
+
+    def _process_delete_action(self, file_path: str) -> bool:
         """
-        ファイル削除イベントを処理
+        Processes a 'delete' action for a file by removing its associated
+        documents from the vector store.
         
         Args:
-            file_path: 削除されたファイルのパス
+            file_path: The path of the file whose documents should be deleted.
             
         Returns:
-            処理が成功したかどうか
+            True if deletion was successful or if no documents needed deletion,
+            False if an error occurred.
         """
         try:
-            # ベクトルストアからファイルを削除
-            logger.info(f"Deleting file from vector store: {file_path}")
-            deleted_count = self.vector_store.delete_file(file_path)
+            logger.info(f"Processing delete action for file: {file_path}")
+            # Use delete_by_source to remove all documents originating from this file_path
+            deleted_count = self.vector_store.delete_by_source(file_path)
             
             if deleted_count > 0:
-                logger.info(f"Deleted {deleted_count} documents for {file_path}")
-                return True
+                logger.info(f"Successfully deleted {deleted_count} documents from vector store for source: {file_path}")
             else:
-                logger.warning(f"No documents found for {file_path}")
-                return False
-                
+                logger.info(f"No documents found in vector store for source: {file_path} (delete action)")
+            return True # Success even if no documents were found, as the state is consistent
+            
         except Exception as e:
-            logger.error(f"Error deleting file {file_path}: {e}")
+            logger.error(f"Error deleting documents for source {file_path} from vector store: {e}", exc_info=True)
             return False
     
     def _process_events(self) -> None:
-        """イベントキューからイベントを取得して処理"""
+        """Continuously monitors the event queue and processes file events."""
         while not self._stop_event.is_set():
             try:
-                # リソースを確保
-                self._init_resources()
+                self._init_resources() # Ensure DB and embedder are ready
                 
-                # キューから次のイベントを取得
                 try:
-                    # 一定時間キューからイベントを待つ
-                    event = self.event_queue.get(timeout=1.0)
+                    event_task = self.event_queue.get(timeout=1.0) # Wait for 1 sec
                 except queue.Empty:
-                    # タイムアウトしたら次のループへ
+                    continue # No event, continue loop
+                
+                file_path = event_task.get('file_path')
+                action = event_task.get('action')
+
+                if not file_path or not action:
+                    logger.warning(f"Invalid event task received: {event_task}")
+                    self.event_queue.task_done()
                     continue
                 
-                try:
-                    # イベントを処理
-                    if event.event_type == 'modified':
-                        success = self._process_file(event.file_path)
-                    elif event.event_type == 'deleted':
-                        success = self._process_delete(event.file_path)
-                    else:
-                        logger.warning(f"Unknown event type: {event.event_type}")
-                        success = False
-                    
-                    # 統計情報をログに出力
-                    if success:
-                        stats = self.vector_store.get_stats()
-                        logger.info(f"Vector store stats: {stats.get('total_documents', 0)} documents, "
-                                   f"{stats.get('total_files', 0)} files")
-                                   
-                finally:
-                    # キューからの取得が完了したことを通知
-                    self.event_queue.task_done()
-                    
-            except Exception as e:
-                logger.error(f"Error in event processing: {e}")
+                logger.info(f"Dequeued event: Action: {action}, File: {file_path}")
                 
-        # リソースを解放
+                success = False
+                if action == 'update': # Covers 'create' and 'modify'
+                    success = self._process_update_action(file_path)
+                elif action == 'delete':
+                    success = self._process_delete_action(file_path)
+                else:
+                    logger.warning(f"Unknown action '{action}' for file {file_path}")
+                
+                if success:
+                    try:
+                        stats = self.vector_store.get_stats() # Assuming this method exists
+                        logger.info(f"Vector store stats: {stats.get('total_documents', 0)} documents, "
+                                   f"{stats.get('files', {}).get('count', 0)} distinct files.") # Adjusted for potential stats structure
+                    except Exception as e:
+                        logger.warning(f"Could not retrieve vector store stats: {e}")
+                
+                self.event_queue.task_done()
+                    
+            except Exception as e: # Catch broad exceptions in the loop to keep worker alive
+                logger.error(f"Unhandled error in event processing loop: {e}", exc_info=True)
+                # Potentially add a small delay before retrying to prevent rapid failure loops
+                time.sleep(5) 
+                
         self._release_resources()
-        logger.info("Vectorization worker stopped")
+        logger.info("Vectorization worker's main event loop stopped.")
     
     def start(self) -> None:
         """ベクトル化ワーカーを開始"""
