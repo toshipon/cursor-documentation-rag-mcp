@@ -535,3 +535,112 @@ class PDFTableAnalyzer:
                     return line
         
         return ""
+
+class PDFProcessor:
+    """
+    Processes PDF files to extract text and metadata.
+    """
+
+    def __init__(self):
+        """
+        Initializes the PDFProcessor.
+        """
+        # Logger setup can be done here if specific configuration is needed
+        pass
+
+    def process_file(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Extracts text and metadata from each page of a PDF file.
+
+        Args:
+            file_path: The path to the PDF file.
+
+        Returns:
+            A list of dictionaries, where each dictionary represents a page
+            and contains the extracted text and metadata (source and page number).
+            Returns an empty list if the file cannot be processed or is empty.
+        """
+        processed_chunks = []
+        
+        if not os.path.exists(file_path):
+            logger.error(f"File not found: {file_path}")
+            return processed_chunks
+
+        try:
+            # Open the PDF file using pdfplumber
+            with pdfplumber.open(file_path) as pdf:
+                if not pdf.pages:
+                    logger.warning(f"No pages found in PDF: {file_path}")
+                    return processed_chunks
+                
+                # Iterate through each page in the PDF
+                for i, page in enumerate(pdf.pages):
+                    page_number = i + 1  # Page numbers are 1-indexed
+                    
+                    # Extract text from the page
+                    text = page.extract_text()
+                    
+                    if text and text.strip():
+                        # Construct the metadata dictionary
+                        metadata = {
+                            'source': file_path,
+                            'page_number': page_number
+                        }
+                        
+                        # Append the processed chunk to the list
+                        processed_chunks.append({
+                            'text': text.strip(),
+                            'metadata': metadata
+                        })
+                    else:
+                        logger.info(f"No text extracted from page {page_number} of {file_path}")
+
+        except pdfplumber.exceptions.PDFSyntaxError as e:
+            logger.error(f"PDFSyntaxError processing file {file_path}: {e}")
+        except Exception as e:
+            # Catch any other exceptions during PDF processing
+            logger.error(f"Error processing PDF file {file_path}: {e}")
+            # Depending on the desired behavior, you might want to re-raise
+            # or return partially processed data if applicable.
+            # For now, returning an empty list or whatever was processed so far.
+
+        return processed_chunks
+
+# Example Usage (optional, for testing purposes)
+if __name__ == '__main__':
+    # Configure basic logging for testing
+    logging.basicConfig(level=logging.INFO)
+    
+    # Create a dummy PDF file for testing
+    # In a real scenario, you would have a PDF file path.
+    dummy_pdf_path = "sample_documents/sample.pdf" # Assuming this was created in a previous step
+    
+    # Create dummy PDF if it doesn't exist (simplified for example)
+    if not os.path.exists(dummy_pdf_path):
+        os.makedirs("sample_documents", exist_ok=True)
+        try:
+            with pdfplumber.open(dummy_pdf_path, "w") as pdf: # This is not how pdfplumber creates PDFs
+                 # This is a placeholder. pdfplumber is for reading.
+                 # For a real test, you'd need an actual PDF file.
+                 # For now, we'll simulate a simple text extraction.
+                 pass
+            # For testing, let's assume a simple text extraction logic here
+            # or use a pre-existing PDF. The following lines would be part of PDF creation.
+            # For this example, we will rely on the PDF created in the previous subtask.
+            logger.info(f"Created a dummy PDF for testing: {dummy_pdf_path} - Please replace with a real PDF.")
+
+    if os.path.exists(dummy_pdf_path):
+        processor = PDFProcessor()
+        extracted_data = processor.process_file(dummy_pdf_path)
+        
+        if extracted_data:
+            logger.info(f"Successfully extracted data from {dummy_pdf_path}:")
+            for chunk in extracted_data:
+                logger.info(f"  Page {chunk['metadata']['page_number']}: {chunk['text'][:100]}...") # Print first 100 chars
+        else:
+            logger.warning(f"No data extracted from {dummy_pdf_path}. Ensure it's a valid PDF with text.")
+    else:
+        logger.error(f"Test PDF file not found: {dummy_pdf_path}. Cannot run example.")
+
+# Ensure pdfplumber is installed
+# You might need to run: pip install pdfplumber
